@@ -1,37 +1,68 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  ActivityIndicator,
-  useWindowDimensions,
+  Alert,
   Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
-import { Colors, FontSize, FontWeight, Spacing, Radius, Motion, Ui } from '@/constants/theme';
-import { useAuthStore } from '@/store/auth-store';
-import { useDataStore, SoundCard } from '@/store/data-store';
-import { Heart, Settings, Radio, Plus } from 'lucide-react-native';
-import * as Speech from 'expo-speech';
+import { useRouter } from 'expo-router';
 import * as Haptics from 'expo-haptics';
-import Animated, { FadeInUp } from 'react-native-reanimated';
+import * as Speech from 'expo-speech';
+import Animated, { FadeInDown, FadeInUp } from 'react-native-reanimated';
+import { ChevronRight, Settings, User } from 'lucide-react-native';
 
-import { AuroraBackground } from '@/components/ui/AuroraBackground';
-import { GlassPanel } from '@/components/ui/GlassPanel';
-import { SectionLabel } from '@/components/ui/SectionLabel';
-import { SpeakCoreButton } from '@/components/ui/SpeakCoreButton';
+import { useAuth } from '@/contexts/AuthContext';
+import { useDataStore, type SoundCard } from '@/store/data-store';
 import { useAudioStore } from '@/store/audio-store';
-import { predictVocalSound, checkBackendHealth } from '@/lib/recognition';
+import { SpeakCoreButton, type SpeakCoreState } from '@/components/ui/SpeakCoreButton';
+import { HeroGreetingCard } from '@/components/ui/HeroGreetingCard';
+import { QuickActionPill } from '@/components/ui/QuickActionPill';
+import { VocalTrainer } from '@/components/VocalTrainer';
+import { QUICK_ACTION_ICON_BY_LABEL, QUICK_ACTION_LABELS, getCategoryMeta } from '@/constants/categories';
+import { Colors, Layout, Radius, Shadow, Spacing, Typography } from '@/constants/theme';
+import { appendConfirmedMatchSample, checkBackendHealth, predictVocalSound } from '@/lib/recognition';
+
+type RecognitionState =
+  | { type: 'idle' }
+  | { type: 'success'; phrase: string; confidence: number; label?: string; modelStatus?: string }
+  | { type: 'no-match'; message: string; modelStatus?: string };
+
+function getGreeting(name?: string | null) {
+  const hour = new Date().getHours();
+  const prefix = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  return `${prefix}, ${name || 'Friend'}`;
+}
+
+function getTone(slug?: string) {
+  switch (slug) {
+    case 'feelings':
+      return 'violet' as const;
+    case 'actions':
+      return 'mint' as const;
+    case 'emergency':
+      return 'coral' as const;
+    default:
+      return 'cyan' as const;
+  }
+}
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
-  const { profile } = useAuthStore();
-  const initializeData = useDataStore((s) => s.initializeData);
-  const soundCards = useDataStore((s) => s.soundCards);
-  const recordRecognition = useDataStore((s) => s.recordRecognition);
-  const incrementCardUsage = useDataStore((s) => s.incrementCardUsage);
+  const router = useRouter();
+  const { height } = useWindowDimensions();
+  const { profile } = useAuth();
+  const voiceFeedbackEnabled = profile?.voice_feedback_enabled !== false;
+  const hapticFeedbackEnabled = profile?.haptic_feedback_enabled !== false;
+  const initializeData = useDataStore((state) => state.initializeData);
+  const categories = useDataStore((state) => state.categories);
+  const soundCards = useDataStore((state) => state.soundCards);
+  const recordRecognition = useDataStore((state) => state.recordRecognition);
+  const incrementCardUsage = useDataStore((state) => state.incrementCardUsage);
+  const updateCardTrainingStatus = useDataStore((state) => state.updateCardTrainingStatus);
 
   const {
     startRecording,
@@ -40,495 +71,686 @@ export default function HomeScreen() {
     isProcessing: isAudioProcessing,
     error: audioError,
   } = useAudioStore();
-  const { height } = useWindowDimensions();
 
   const [isPredicting, setIsPredicting] = useState(false);
-  const [lastPhrase, setLastPhrase] = useState<string | null>(null);
   const [backendOk, setBackendOk] = useState<boolean | null>(null);
+  const [recognitionState, setRecognitionState] = useState<RecognitionState>({ type: 'idle' });
+  const [lastSpoken, setLastSpoken] = useState<string | null>(null);
+  const [isTrainerVisible, setIsTrainerVisible] = useState(false);
+  const [selectedCardForTraining, setSelectedCardForTraining] = useState<SoundCard | null>(null);
+
+  const isCompactHeight = height < 820;
+  const isVeryCompactHeight = height < 760;
+  const speakSize = isVeryCompactHeight ? 122 : isCompactHeight ? 132 : 140;
+  const verticalGap = isVeryCompactHeight ? 10 : 14;
 
   useEffect(() => {
     void initializeData();
   }, [initializeData]);
 
-  const refreshHealth = useCallback(() => {
+  useEffect(() => {
     void checkBackendHealth().then(setBackendOk);
+    const interval = setInterval(() => {
+      void checkBackendHealth().then(setBackendOk);
+    }, 15000);
+    return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    refreshHealth();
-    const t = setInterval(refreshHealth, 15000);
-    return () => clearInterval(t);
-  }, [refreshHealth]);
+  const quickActions = useMemo(() => {
+    const favorites = [...soundCards]
+      .filter((card) => card.is_favorite)
+      .sort((left, right) => {
+        if (left.is_emergency !== right.is_emergency) {
+          return left.is_emergency ? -1 : 1;
+        }
+        if (left.training_status !== right.training_status) {
+          return left.training_status === 'ready' ? -1 : 1;
+        }
+        return right.usage_count - left.usage_count;
+      });
 
-  const entrance = (delay: number) =>
-    FadeInUp.delay(delay).springify().damping(20).stiffness(150);
+    const fallback = QUICK_ACTION_LABELS.map((label) => soundCards.find((card) => card.label === label)).filter(
+      (card): card is SoundCard => Boolean(card),
+    );
 
-  const readyCards = soundCards.filter((c) => c.training_status === 'ready');
-  const favoriteCards = soundCards
-    .filter((c) => c.is_favorite && c.training_status === 'ready')
-    .slice(0, 8);
+    const ordered = [...favorites, ...fallback];
+    const unique = ordered.filter((card, index, array) => array.findIndex((item) => item.id === card.id) === index);
+    return unique.slice(0, 6);
+  }, [soundCards]);
 
-  const speakPhrase = (text: string) => {
-    Speech.speak(text, {
-      language: profile?.output_language || 'en',
-      pitch: 1.0,
-      rate: 0.9,
-    });
-  };
+  const readyCards = useMemo(
+    () => soundCards.filter((card) => card.training_status === 'ready').length,
+    [soundCards],
+  );
+  const trainingCards = useMemo(
+    () => soundCards.filter((card) => card.training_status !== 'ready').length,
+    [soundCards],
+  );
+  const calibrationCount = useMemo(
+    () => soundCards.reduce((sum, card) => sum + card.sample_count, 0),
+    [soundCards],
+  );
 
-  const handleFavoritePress = (card: SoundCard) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    speakPhrase(card.phrase_output);
-  };
+  const speakState: SpeakCoreState = isRecording
+    ? 'listening'
+    : isPredicting || isAudioProcessing
+      ? 'processing'
+      : recognitionState.type === 'success'
+        ? 'recognized'
+        : recognitionState.type === 'no-match'
+          ? 'no-match'
+          : 'idle';
 
-  const handleSpeakPress = async () => {
+  const speakLiveStatus = (() => {
     if (isRecording) {
-      try {
-        setIsPredicting(true);
-        const uri = await stopRecording();
-        if (!uri) {
-          setLastPhrase(null);
-          return;
-        }
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        const result = await predictVocalSound(uri);
-
-        if (result?.sound_card_id && result.phrase_output) {
-          setLastPhrase(result.phrase_output);
-          speakPhrase(result.phrase_output);
-          await recordRecognition({
-            phrase_output: result.phrase_output,
-            confidence: result.confidence,
-            sound_card_id: result.sound_card_id,
-          });
-          await incrementCardUsage(result.sound_card_id);
-        } else {
-          setLastPhrase(
-            result?.message === 'No confident match found'
-              ? 'No confident match'
-              : 'Recognition unclear',
-          );
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        }
-      } catch (error) {
-        console.error('Prediction failed:', error);
-        setLastPhrase('Recognition service unreachable');
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      } finally {
-        setIsPredicting(false);
-      }
-    } else {
-      try {
-        setLastPhrase(null);
-        await startRecording();
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-      } catch (error) {
-        console.error('Failed to start recording:', error);
-      }
+      return {
+        label: 'Listening for your voice...',
+        tone: 'info' as const,
+      };
     }
-  };
 
-  const insightLine =
-    backendOk === null
-      ? 'Checking recognition service…'
-      : backendOk
-        ? readyCards.length > 0
-          ? `${readyCards.length} trained sound(s) ready. Use the core to match your voice to a card.`
-          : 'Open the Bank and complete TRAIN on at least one card so matching works.'
-        : 'Recognition service offline — start the backend (see RUN.md) and set EXPO_PUBLIC_RECOGNITION_API_URL.';
+    if (isPredicting || isAudioProcessing) {
+      return {
+        label: 'Matching against your trained phrases...',
+        tone: 'info' as const,
+      };
+    }
 
-  const backendLabel =
-    backendOk === null ? 'Checking…' : backendOk ? 'Service online' : 'Service offline';
+    if (recognitionState.type === 'success') {
+      return {
+        label: recognitionState.modelStatus ?? 'Confident match found.',
+        tone: 'success' as const,
+      };
+    }
+
+    if (recognitionState.type === 'no-match') {
+      return {
+        label:
+          recognitionState.modelStatus ??
+          (backendOk === false ? 'Recognition service is offline.' : 'No confident match yet.'),
+        tone: 'warning' as const,
+      };
+    }
+
+    return {
+      label: backendOk === false ? 'Recognition service offline.' : 'Model ready for a new sound.',
+      tone: backendOk === false ? ('warning' as const) : ('default' as const),
+    };
+  })();
+
+  function speakPhrase(text: string) {
+    setLastSpoken(text);
+    if (voiceFeedbackEnabled) {
+      Speech.speak(text, {
+        language: profile?.output_language || 'en',
+        pitch: 1,
+        rate: 0.9,
+      });
+    }
+  }
+
+  function promptToSaveConfirmedMatch(uri: string, card: SoundCard) {
+    Alert.alert(
+      'Add this match to training?',
+      `TalkBridge recognized "${card.label}". Do you want to save this live recording as another training sample for this card?`,
+      [
+        { text: 'Not now', style: 'cancel' },
+        {
+          text: 'Add sample',
+          onPress: () => {
+            void appendConfirmedMatchSample({
+              uri,
+              soundCardId: card.id,
+              label: card.label,
+              phraseOutput: card.phrase_output,
+            })
+              .then(async (trainingResponse) => {
+                if (!trainingResponse) {
+                  Alert.alert(
+                    'Training library full',
+                    'This card already has enough extra samples saved for now.',
+                  );
+                  return;
+                }
+
+                await updateCardTrainingStatus(
+                  card.id,
+                  trainingResponse.sample_count >= 3 ? 'ready' : 'needs_more_samples',
+                  trainingResponse.sample_count,
+                  {
+                    enrollment_quality: trainingResponse.enrollment_quality,
+                    distinctiveness_status: trainingResponse.distinctiveness_status,
+                    consistency_score: trainingResponse.consistency_score,
+                    recommended_action: trainingResponse.recommended_action ?? null,
+                  },
+                );
+
+                Alert.alert(
+                  'Sample added',
+                  `Saved this live match to "${card.label}" to strengthen future recognition.`,
+                );
+              })
+              .catch((error) => {
+                Alert.alert(
+                  'Could not add sample',
+                  error instanceof Error ? error.message : 'Please try again.',
+                );
+              });
+          },
+        },
+      ],
+    );
+  }
+
+  async function triggerQuickAction(card: SoundCard) {
+    if (card.training_status !== 'ready') {
+      if (hapticFeedbackEnabled) {
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      }
+      setSelectedCardForTraining(card);
+      setIsTrainerVisible(true);
+      return;
+    }
+
+    if (hapticFeedbackEnabled) {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    speakPhrase(card.phrase_output);
+    setRecognitionState({
+      type: 'success',
+      phrase: card.phrase_output,
+      confidence: 1,
+      label: card.label,
+      modelStatus: 'Quick phrase played instantly.',
+    });
+    await incrementCardUsage(card.id);
+  }
+
+  async function handleSpeakPress() {
+    if (!isRecording && backendOk === false) {
+      setRecognitionState({
+        type: 'no-match',
+        message:
+          'Recognition is offline right now. Keep the backend running and make sure your phone and laptop are on the same Wi-Fi.',
+        modelStatus: 'Recognition service offline.',
+      });
+      if (hapticFeedbackEnabled) {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      }
+      return;
+    }
+
+    if (!isRecording) {
+      setRecognitionState({ type: 'idle' });
+      await startRecording();
+
+      const nextError = useAudioStore.getState().error;
+      if (nextError) {
+        setRecognitionState({
+          type: 'no-match',
+          message: nextError,
+          modelStatus: 'Recording could not start.',
+        });
+      }
+      return;
+    }
+
+    try {
+      setIsPredicting(true);
+      const uri = await stopRecording();
+      if (!uri) {
+        setRecognitionState({
+          type: 'no-match',
+          message: 'Could not capture sound.',
+          modelStatus: 'No recording was captured.',
+        });
+        return;
+      }
+
+      const result = await predictVocalSound(uri);
+
+      if (result?.sound_card_id && result.phrase_output) {
+        const matchedCard = soundCards.find((card) => card.id === result.sound_card_id);
+        const phrase = result.phrase_output;
+
+        setRecognitionState({
+          type: 'success',
+          phrase,
+          confidence: result.confidence,
+          label: matchedCard?.label,
+          modelStatus:
+            result.decision_source === 'prototype_acoustic_fallback'
+              ? 'Matched with the prototype fallback path.'
+              : 'Matched using acoustic similarity from your saved samples.',
+        });
+        speakPhrase(phrase);
+        await recordRecognition({
+          phrase_output: phrase,
+          confidence: result.confidence,
+          sound_card_id: result.sound_card_id,
+        });
+        await incrementCardUsage(result.sound_card_id);
+        if (matchedCard && result.confidence >= 0.72) {
+          promptToSaveConfirmedMatch(uri, matchedCard);
+        }
+        if (hapticFeedbackEnabled) {
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }
+      } else {
+        setRecognitionState({
+          type: 'no-match',
+          message: result.message ?? 'No trained card matched that sound yet.',
+          modelStatus:
+            result.rejection_reason === 'low_margin'
+              ? 'Two phrases sounded too similar to separate safely.'
+              : result.rejection_reason === 'below_threshold'
+                ? 'The recording was heard, but it was not strong enough to match.'
+                : 'No trained card matched this sound yet.',
+        });
+        if (hapticFeedbackEnabled) {
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        }
+      }
+    } catch (error: unknown) {
+        setRecognitionState({
+          type: 'no-match',
+          message:
+          error instanceof Error
+            ? backendOk === false
+              ? 'Could not reach the recognition service. Check that your laptop and phone are on the same Wi-Fi and the backend is running.'
+              : error.message
+            : 'Recognition is unavailable right now. Use quick phrases or train more cards.',
+          modelStatus: backendOk === false ? 'Recognition service offline.' : 'Recognition request failed.',
+        });
+      if (hapticFeedbackEnabled) {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      }
+    } finally {
+      setIsPredicting(false);
+    }
+  }
+
+  const statusCard = (() => {
+    if (recognitionState.type === 'success') {
+      return (
+        <View style={[styles.infoCard, styles.successCard]}>
+          <Text style={styles.infoEyebrow}>Recognized</Text>
+          <Text style={styles.infoHeadline} numberOfLines={2}>
+            {recognitionState.phrase}
+          </Text>
+          <Text style={styles.infoMeta}>
+            {recognitionState.label ?? 'Matched phrase'} • {Math.round(recognitionState.confidence * 100)}%
+          </Text>
+        </View>
+      );
+    }
+
+    if (recognitionState.type === 'no-match') {
+      return (
+        <View style={[styles.infoCard, styles.warningCard]}>
+          <Text style={styles.infoEyebrow}>
+            {backendOk === false ? 'Recognition offline' : 'Needs training'}
+          </Text>
+          <Text style={styles.infoHeadline} numberOfLines={2}>
+            {recognitionState.message}
+          </Text>
+          <Pressable style={styles.inlineAction} onPress={() => router.push('/categories')}>
+            <Text style={styles.inlineActionText}>
+              {backendOk === false ? 'Open phrases' : 'Open train'}
+            </Text>
+            <ChevronRight size={14} color={Colors.warning} />
+          </Pressable>
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.infoCard}>
+        <View style={styles.infoTopRow}>
+          <Text style={styles.infoEyebrow}>Communication bank</Text>
+          <Pressable style={styles.inlineAction} onPress={() => router.push('/categories')}>
+            <Text style={styles.inlineActionText}>Open train</Text>
+            <ChevronRight size={14} color={Colors.primary} />
+          </Pressable>
+        </View>
+        <View style={styles.metricsRow}>
+          <View style={styles.metricCard}>
+            <Text style={styles.metricValue}>{readyCards}</Text>
+            <Text style={styles.metricLabel}>Ready</Text>
+          </View>
+          <View style={[styles.metricCard, styles.metricCardViolet]}>
+            <Text style={styles.metricValue}>{trainingCards}</Text>
+            <Text style={styles.metricLabel}>Training</Text>
+          </View>
+          <View style={[styles.metricCard, styles.metricCardMint]}>
+            <Text style={styles.metricValue}>{calibrationCount}</Text>
+            <Text style={styles.metricLabel}>Samples</Text>
+          </View>
+        </View>
+        <Text style={styles.infoMeta} numberOfLines={1}>
+          {audioError
+            ? audioError
+            : lastSpoken
+              ? `Last message: ${lastSpoken}`
+              : backendOk === false
+                ? 'Recognition service unavailable'
+                : backendOk
+                  ? 'Recognition ready'
+                  : 'Checking recognition service'}
+        </Text>
+      </View>
+    );
+  })();
 
   return (
-    <AuroraBackground>
+    <View
+      style={[
+        styles.container,
+        {
+          paddingTop: insets.top + 8,
+        },
+      ]}
+    >
+      <View style={styles.topBar}>
+        <View style={styles.avatarContainer}>
+          <View style={styles.avatar}>
+            <User size={20} color={Colors.primary} />
+          </View>
+          <Text style={styles.appName}>TalkBridge</Text>
+        </View>
+        <Pressable
+          onPress={() => router.push('/settings')}
+          style={({ pressed }) => [styles.iconButton, pressed && styles.iconButtonPressed]}
+        >
+          <Settings size={22} color={Colors.textPrimary} />
+        </Pressable>
+      </View>
+
       <ScrollView
-        showsVerticalScrollIndicator={false}
+        style={styles.scrollArea}
         contentContainerStyle={[
-          styles.contentContainer,
-          { minHeight: height, paddingTop: insets.top + Spacing.md },
+          styles.content,
+          {
+            gap: verticalGap,
+            paddingBottom: Layout.bottomNavClearance + insets.bottom + (isVeryCompactHeight ? 12 : 20),
+          },
         ]}
+        showsVerticalScrollIndicator={false}
       >
-        <Animated.View entering={entrance(0)}>
-          <View style={styles.topRow}>
-            <View style={styles.brandBlock}>
-              <Text style={Ui.overline}>TalkBridge</Text>
-              <Text style={styles.greetingLine}>
-                <Text style={styles.greetingMuted}>Hello, </Text>
-                <Text style={styles.greetingName}>{profile?.display_name || 'Friend'}</Text>
-              </Text>
+        <Animated.View entering={FadeInDown.springify()}>
+          <HeroGreetingCard
+            compact
+            greeting={getGreeting(profile?.display_name?.split(' ')[0])}
+            message="Ready to listen and speak with you."
+            statusLabel={
+              backendOk === false ? 'Backend offline' : backendOk ? 'Recognition ready' : 'Checking service'
+            }
+          />
+        </Animated.View>
+
+        <Animated.View entering={FadeInDown.delay(60).springify()} style={styles.beaconPanel}>
+          <Text style={styles.beaconEyebrow}>Voice beacon</Text>
+          <SpeakCoreButton
+            state={speakState}
+            onPress={() => void handleSpeakPress()}
+            size={speakSize}
+            liveStatus={speakLiveStatus.label}
+            liveStatusTone={speakLiveStatus.tone}
+            disabled={backendOk === false && !isRecording}
+          />
+          <Text style={styles.beaconSupport}>
+            {backendOk === false
+              ? 'Recognition is offline. Quick phrases still work, but live matching needs the backend.'
+              : 'Tap once to start listening, tap again to stop and match.'}
+          </Text>
+        </Animated.View>
+
+        <Animated.View entering={FadeInUp.delay(110).springify()}>
+          {statusCard}
+        </Animated.View>
+
+        <Animated.View entering={FadeInUp.delay(160).springify()} style={styles.shortcutsPanel}>
+          <View style={styles.shortcutsHeader}>
+            <View>
+              <Text style={styles.shortcutsEyebrow}>Quick phrases</Text>
+              <Text style={styles.shortcutsTitle}>Speak fast</Text>
             </View>
-            <Pressable
-              onPress={() => router.push('/settings')}
-              style={({ pressed }) => [styles.settingsFab, pressed && { opacity: 0.82 }]}
-            >
-              <Settings size={22} color={Colors.primary} strokeWidth={2} />
+            <Pressable style={styles.inlineAction} onPress={() => router.push('/categories')}>
+              <Text style={styles.inlineActionText}>Browse</Text>
+              <ChevronRight size={14} color={Colors.primary} />
             </Pressable>
           </View>
 
-          <View style={styles.statusRow}>
-            <View
-              style={[
-                styles.statusChip,
-                backendOk === true && styles.statusChipOk,
-                backendOk === false && styles.statusChipOff,
-              ]}
-            >
-              <Radio
-                size={14}
-                color={
-                  backendOk === null
-                    ? Colors.textMuted
-                    : backendOk
-                      ? Colors.success
-                      : Colors.emergency
-                }
-              />
-              <Text style={styles.statusChipText}>{backendLabel}</Text>
-            </View>
-            <View style={styles.statusChipMuted}>
-              <Text style={styles.statusChipMutedText}>{readyCards.length} ready</Text>
-            </View>
+          <View style={styles.quickGrid}>
+            {quickActions.map((card) => {
+              const category = categories.find((item) => item.id === card.category_id);
+              const meta = getCategoryMeta(category?.slug);
+              const Icon = QUICK_ACTION_ICON_BY_LABEL[card.label] ?? meta.icon;
+
+              return (
+                <View key={card.id} style={styles.quickGridItem}>
+                  <QuickActionPill
+                    compact
+                    label={card.label}
+                    subtitle={
+                      card.training_status === 'ready'
+                        ? 'Ready'
+                        : `${card.sample_count}/3 samples`
+                    }
+                    icon={Icon}
+                    tone={getTone(category?.slug)}
+                    onPress={() => void triggerQuickAction(card)}
+                  />
+                </View>
+              );
+            })}
           </View>
         </Animated.View>
-
-        <Animated.View entering={entrance(Motion.choreography.stagger)} style={styles.hero}>
-          <GlassPanel variant="elevated" padding={28} style={styles.heroPanel}>
-            <SpeakCoreButton
-              onPress={handleSpeakPress}
-              isListening={isRecording}
-              isProcessing={isPredicting || isAudioProcessing}
-            />
-            <View style={styles.statusBox}>
-              {isPredicting ? (
-                <Animated.View key="predicting" entering={FadeInUp} style={styles.statusInner}>
-                  <ActivityIndicator size="small" color={Colors.primary} />
-                  <Text style={styles.statusText}>Matching your sound…</Text>
-                </Animated.View>
-              ) : lastPhrase ? (
-                <Animated.Text key="phrase" entering={FadeInUp} style={styles.phraseText}>
-                  “{lastPhrase}”
-                </Animated.Text>
-              ) : (
-                <Animated.Text key="idle" entering={FadeInUp} style={styles.hintText}>
-                  {isRecording ? 'Listening…' : 'Tap once to record · tap again to match'}
-                </Animated.Text>
-              )}
-            </View>
-            {audioError ? <Text style={styles.audioErr}>{audioError}</Text> : null}
-          </GlassPanel>
-        </Animated.View>
-
-        <Animated.View entering={entrance(Motion.choreography.stagger * 2)}>
-          <View style={styles.sectionHeadRow}>
-            <View style={styles.sectionLabelFlex}>
-              <SectionLabel
-                eyebrow="Shortcuts"
-                title="Favorite sounds"
-                subtitle="Tap a card to speak it instantly."
-              />
-            </View>
-            <Pressable
-              onPress={() => router.push('/modal')}
-              style={({ pressed }) => [styles.addPill, pressed && { opacity: 0.88 }]}
-            >
-              <Plus size={18} color={Colors.textInverse} strokeWidth={2.5} />
-              <Text style={styles.addPillText}>New</Text>
-            </Pressable>
-          </View>
-
-          {favoriteCards.length === 0 ? (
-            <GlassPanel variant="ghost" padding={Spacing.xl} style={styles.emptyFav}>
-              <Heart size={32} color={Colors.textMuted} style={{ opacity: 0.5, marginBottom: Spacing.md }} />
-              <Text style={styles.emptyFavTitle}>No favorites yet</Text>
-              <Text style={styles.emptyFavText}>
-                Train cards in the Bank, then tap the heart on a card you use often.
-              </Text>
-              <Pressable
-                onPress={() => router.push('/categories')}
-                style={({ pressed }) => [styles.secondaryBtn, pressed && { opacity: 0.88 }]}
-              >
-                <Text style={styles.secondaryBtnText}>Open Bank</Text>
-              </Pressable>
-            </GlassPanel>
-          ) : (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.favScroll}
-            >
-              {favoriteCards.map((card) => (
-                <Pressable
-                  key={card.id}
-                  onPress={() => handleFavoritePress(card)}
-                  style={({ pressed }) => [styles.favCardWrap, pressed && { opacity: 0.92 }]}
-                >
-                  <GlassPanel
-                    accent={card.is_emergency}
-                    padding={Spacing.lg}
-                    style={styles.favCard}
-                  >
-                    <View style={styles.favIconRow}>
-                      <Heart
-                        size={20}
-                        color={card.is_emergency ? Colors.emergency : Colors.warmth}
-                        fill={card.is_emergency ? Colors.emergency : Colors.warmth}
-                      />
-                    </View>
-                    <Text style={styles.cardLabel} numberOfLines={3}>
-                      {card.phrase_output}
-                    </Text>
-                  </GlassPanel>
-                </Pressable>
-              ))}
-            </ScrollView>
-          )}
-        </Animated.View>
-
-        <Animated.View entering={entrance(Motion.choreography.stagger * 3)}>
-          <GlassPanel variant="ghost" padding={Spacing.lg} style={styles.insightPanel}>
-            <View style={styles.insightRow}>
-              <View style={styles.insightIcon}>
-                <Radio size={18} color={Colors.accent} />
-              </View>
-              <Text style={styles.insightText}>{insightLine}</Text>
-            </View>
-          </GlassPanel>
-        </Animated.View>
-
-        <View style={{ height: 120 + insets.bottom }} />
       </ScrollView>
-    </AuroraBackground>
+
+      {selectedCardForTraining && isTrainerVisible ? (
+        <VocalTrainer
+          isVisible={isTrainerVisible}
+          onClose={() => setIsTrainerVisible(false)}
+          soundCard={selectedCardForTraining}
+          backendAvailable={backendOk}
+        />
+      ) : null}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  contentContainer: {
-    paddingHorizontal: Spacing.xl,
+  container: {
+    flex: 1,
+    backgroundColor: Colors.background,
+    paddingHorizontal: Layout.screenPadding,
   },
-  topRow: {
+  topBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: Spacing.lg,
-  },
-  brandBlock: {
-    flex: 1,
-    paddingRight: Spacing.md,
-  },
-  greetingLine: {
-    marginTop: Spacing.sm,
-  },
-  greetingMuted: {
-    fontSize: FontSize['2xl'],
-    color: Colors.textSecondary,
-    fontWeight: FontWeight.medium,
-  },
-  greetingName: {
-    fontSize: FontSize['2xl'],
-    color: Colors.textPrimary,
-    fontWeight: FontWeight.bold,
-    letterSpacing: -0.5,
-  },
-  settingsFab: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: Colors.surfaceElevated,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: Colors.strokeStrong,
-  },
-  statusRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    marginBottom: Spacing['2xl'],
-  },
-  statusChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: Radius.pill,
-    backgroundColor: Colors.surfaceHighlight,
-    borderWidth: 1,
-    borderColor: Colors.glassBorder,
-  },
-  statusChipOk: {
-    borderColor: 'rgba(56, 226, 177, 0.35)',
-    backgroundColor: 'rgba(56, 226, 177, 0.08)',
-  },
-  statusChipOff: {
-    borderColor: 'rgba(255, 90, 95, 0.35)',
-    backgroundColor: 'rgba(255, 90, 95, 0.08)',
-  },
-  statusChipText: {
-    fontSize: FontSize.sm,
-    fontWeight: FontWeight.semibold,
-    color: Colors.textPrimary,
-  },
-  statusChipMuted: {
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: Radius.pill,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    borderWidth: 1,
-    borderColor: Colors.glassBorder,
-    justifyContent: 'center',
-  },
-  statusChipMutedText: {
-    fontSize: FontSize.sm,
-    color: Colors.textSecondary,
-    fontWeight: FontWeight.medium,
-  },
-  hero: {
-    marginBottom: Spacing['2xl'],
-  },
-  heroPanel: {
     alignItems: 'center',
   },
-  statusBox: {
-    marginTop: Spacing.lg,
-    minHeight: 56,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: Spacing.md,
-  },
-  statusInner: {
+  avatarContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
-  statusText: {
-    color: Colors.primary,
-    fontSize: FontSize.base,
-    fontWeight: FontWeight.semibold,
-  },
-  phraseText: {
-    fontSize: FontSize.xl,
-    color: Colors.textPrimary,
-    fontWeight: FontWeight.bold,
-    textAlign: 'center',
-    lineHeight: 28,
-    textShadowColor: Colors.glowPrimary,
-    textShadowRadius: 12,
-  },
-  hintText: {
-    color: Colors.textSecondary,
-    fontSize: FontSize.sm,
-    letterSpacing: 0.2,
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  audioErr: {
-    marginTop: Spacing.sm,
-    fontSize: FontSize.xs,
-    color: Colors.emergency,
-    textAlign: 'center',
-  },
-  sectionHeadRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: Spacing.md,
-    marginBottom: Spacing.sm,
-  },
-  sectionLabelFlex: {
-    flex: 1,
-    minWidth: 0,
-  },
-  addPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: Colors.primary,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: Radius.pill,
-    marginTop: 28,
-  },
-  addPillText: {
-    color: Colors.textInverse,
-    fontWeight: FontWeight.bold,
-    fontSize: FontSize.sm,
-  },
-  favScroll: {
-    paddingBottom: Spacing['2xl'],
-    gap: Spacing.md,
-    paddingRight: Spacing.xl,
-  },
-  favCardWrap: {
-    width: 168,
-    marginRight: Spacing.md,
-  },
-  favCard: {
-    minHeight: 132,
-    justifyContent: 'flex-start',
-  },
-  favIconRow: {
-    marginBottom: Spacing.sm,
-  },
-  emptyFav: {
-    marginBottom: Spacing['2xl'],
-    alignItems: 'flex-start',
-  },
-  emptyFavTitle: {
-    fontSize: FontSize.lg,
-    fontWeight: FontWeight.bold,
-    color: Colors.textPrimary,
-    marginBottom: Spacing.xs,
-  },
-  emptyFavText: {
-    color: Colors.textSecondary,
-    fontSize: FontSize.sm,
-    lineHeight: 21,
-    marginBottom: Spacing.lg,
-  },
-  secondaryBtn: {
-    backgroundColor: Colors.surfaceHighlight,
-    paddingVertical: 12,
-    paddingHorizontal: Spacing.xl,
-    borderRadius: Radius.pill,
-    borderWidth: 1,
-    borderColor: Colors.strokeStrong,
-  },
-  secondaryBtnText: {
-    color: Colors.primary,
-    fontWeight: FontWeight.bold,
-    fontSize: FontSize.sm,
-  },
-  cardLabel: {
-    color: Colors.textPrimary,
-    fontSize: FontSize.sm,
-    fontWeight: FontWeight.semibold,
-    lineHeight: 20,
-  },
-  insightPanel: {
-    marginTop: Spacing.sm,
-  },
-  insightRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 14,
-  },
-  insightIcon: {
+  avatar: {
     width: 36,
     height: 36,
-    borderRadius: 12,
-    backgroundColor: 'rgba(56, 226, 177, 0.12)',
-    alignItems: 'center',
+    borderRadius: 18,
+    backgroundColor: `${Colors.primary}15`,
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(56, 226, 177, 0.25)',
+    alignItems: 'center',
   },
-  insightText: {
+  appName: {
+    fontSize: 18,
+    fontFamily: 'Outfit-Bold',
+    color: Colors.textPrimary,
+  },
+  iconButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: Colors.surface,
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...Shadow.soft,
+  },
+  iconButtonPressed: {
+    transform: [{ scale: 0.97 }],
+    opacity: 0.92,
+  },
+  content: {
+    paddingTop: 10,
+  },
+  scrollArea: {
     flex: 1,
+  },
+  beaconPanel: {
+    alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.card,
+    borderWidth: 1,
+    borderColor: Colors.strokeMuted,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    ...Shadow.soft,
+  },
+  beaconEyebrow: {
+    ...Typography.microLabel,
     color: Colors.textSecondary,
-    fontSize: FontSize.sm,
-    fontWeight: FontWeight.medium,
-    lineHeight: 21,
+    marginBottom: 6,
+  },
+  beaconSupport: {
+    ...Typography.supportText,
+    textAlign: 'center',
+    marginTop: 10,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  infoCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.card,
+    borderWidth: 1,
+    borderColor: Colors.strokeMuted,
+    padding: Spacing.lg,
+    ...Shadow.soft,
+  },
+  successCard: {
+    backgroundColor: Colors.surfaceTintMint,
+    borderColor: 'rgba(16,185,129,0.14)',
+  },
+  warningCard: {
+    backgroundColor: '#FFF8EE',
+    borderColor: 'rgba(245,158,11,0.16)',
+  },
+  infoTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  infoEyebrow: {
+    ...Typography.microLabel,
+    color: Colors.textSecondary,
+    marginBottom: 8,
+  },
+  infoHeadline: {
+    ...Typography.cardTitle,
+    fontSize: 20,
+    lineHeight: 24,
+    color: Colors.textPrimary,
+  },
+  infoMeta: {
+    ...Typography.supportText,
+    fontSize: 12,
+    lineHeight: 17,
+    color: Colors.textSecondary,
+    marginTop: 10,
+  },
+  metricsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  metricCard: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 6,
+    borderRadius: Radius.lg,
+    backgroundColor: Colors.surfaceTintBlue,
+    borderWidth: 1,
+    borderColor: 'rgba(37,99,235,0.08)',
+    alignItems: 'center',
+  },
+  metricCardViolet: {
+    backgroundColor: Colors.surfaceTintViolet,
+    borderColor: 'rgba(124,58,237,0.08)',
+  },
+  metricCardMint: {
+    backgroundColor: Colors.surfaceTintMint,
+    borderColor: 'rgba(16,185,129,0.08)',
+  },
+  metricValue: {
+    ...Typography.statNumber,
+    fontSize: 22,
+    lineHeight: 24,
+  },
+  metricLabel: {
+    ...Typography.microLabel,
+    marginTop: 4,
+    fontSize: 10,
+    color: Colors.textSecondary,
+    letterSpacing: 0.3,
+  },
+  inlineAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: Radius.pill,
+    backgroundColor: `${Colors.primary}10`,
+    borderWidth: 1,
+    borderColor: `${Colors.primary}20`,
+  },
+  inlineActionText: {
+    color: Colors.primary,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  shortcutsPanel: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.card,
+    borderWidth: 1,
+    borderColor: Colors.strokeMuted,
+    padding: Spacing.md,
+    ...Shadow.soft,
+  },
+  shortcutsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: Spacing.sm,
+    gap: 10,
+  },
+  shortcutsEyebrow: {
+    ...Typography.microLabel,
+    color: Colors.textSecondary,
+    marginBottom: 4,
+  },
+  shortcutsTitle: {
+    ...Typography.sectionTitle,
+    fontSize: 20,
+    lineHeight: 24,
+  },
+  quickGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  quickGridItem: {
+    width: '31.6%',
   },
 });

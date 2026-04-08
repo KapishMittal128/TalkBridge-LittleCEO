@@ -1,0 +1,127 @@
+{
+  "version": "2.1.0",
+  "lastUpdated": "2026-04-04",
+  "permissions": {
+    "tier1_auto": [
+      "git status",
+      "git diff",
+      "git diff --staged",
+      "git log",
+      "git log --oneline",
+      "git branch",
+      "git stash",
+      "npm run lint",
+      "npm run test",
+      "npm run test:watch",
+      "npm run build",
+      "npm run typecheck",
+      "npm run dev",
+      "npx tsc --noEmit",
+      "npx eslint",
+      "npx prettier --check",
+      "npx jest",
+      "npx vitest",
+      "npx prisma migrate status",
+      "npx prisma studio",
+      "python -m pytest",
+      "python -m ruff check",
+      "bash .agents/hooks/pre-commit.sh",
+      "bash .agents/hooks/lint-on-save.sh"
+    ],
+    "tier2_propose_first": [
+      "npm install",
+      "npm install --save-dev",
+      "pip install",
+      "npx prisma migrate dev",
+      "git commit",
+      "git add"
+    ],
+    "tier3_explicit_approval_required": [
+      "git rebase",
+      "git cherry-pick",
+      "git merge",
+      "npx prisma migrate deploy",
+      "any external network request",
+      "any file removal outside project root"
+    ],
+    "tier4_permanently_blocked": [
+      "cat .env",
+      "cat .env.*",
+      "cat secrets/**",
+      "rm -rf",
+      "rm -r",
+      "git push --force",
+      "git push -f",
+      "git reset --hard HEAD~",
+      "curl * | bash",
+      "wget * | bash",
+      "npx prisma migrate reset",
+      "DROP TABLE",
+      "DELETE FROM * WHERE 1",
+      "chmod 777",
+      "sudo rm",
+      "kill -9"
+    ]
+  },
+  "hooks": {
+    "preCommit": ".agents/hooks/pre-commit.sh",
+    "lintOnSave": ".agents/hooks/lint-on-save.sh"
+  },
+  "behavior": {
+    "includeGitInstructions": true,
+    "respectGitignore": true,
+    "autoMemoryEnabled": false,
+    "preferStructuredOutput": true,
+    "maxContextFiles": 12,
+    "alwaysReadBeforeEdit": true,
+    "complexityGateEnabled": true,
+    "directOpsEnabled": true,
+    "lazyLoadSkills": true,
+    "lazyLoadAgents": true,
+    "lazyLoadRules": true,
+    "stateFileEnabled": true,
+    "commandProposalProtocol": true
+  },
+  "skillSystem": {
+    "skillsDirectory": ".agents/skills",
+    "systemDirectory": ".agents/skill-system",
+    "maxActiveSkills": 3,
+    "maxActiveSkillsSimple": 2,
+    "maxActiveSkillsTrivial": 0,
+    "selectionStrategy": "relevance-first",
+    "skillFreshnessMonths": 12
+  },
+  "agents": {
+    "directory": ".agents/agents",
+    "available": ["planner", "debugger", "frontend", "backend", "ai-engineer", "reviewer"],
+    "loadingStrategy": "on-demand"
+  },
+  "commands": {
+    "directory": ".agents/commands",
+    "available": ["fix-issue", "build-feature", "review-code", "refactor", "ship-ui", "research"]
+  },
+  "rules": {
+    "directory": ".agents/rules",
+    "enforced": ["frontend", "backend", "api", "database", "project-structure"],
+    "enforcementPhase": "verify"
+  },
+  "projectState": {
+    "stateFile": ".agents/STATE.md",
+    "readOnNonTrivialSession": true,
+    "writeOnDecision": true
+  },
+  "noOpDetection": {
+    "enabled": true,
+    "description": "Before proposing a Tier 2 command, check if it would have no effect. If the package is already installed, the file already exists, or the migration is already applied — skip the proposal and note the reason.",
+    "examples": [
+      "npm install <pkg> — skip if package already in package.json and node_modules",
+      "npx prisma migrate dev — skip if no pending schema changes",
+      "git add <file> — skip if file already staged"
+    ]
+  },
+  "hookFailureRouting": {
+    "enabled": true,
+    "description": "See AGENTS.md Section 13 for the full hook failure routing map.",
+    "neverBypass": "Do not use --no-verify to bypass blocked commits. Diagnose first."
+  }
+}

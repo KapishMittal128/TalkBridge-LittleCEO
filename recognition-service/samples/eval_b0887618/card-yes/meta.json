@@ -1,0 +1,1 @@
+{"label": "Yes", "id": "card-yes", "phrase_output": "Yes", "vocalization_transcript": "ahr", "consistency_score": 0.9993, "prototype_threshold": 0.96, "margin_threshold": 0.14, "enrollment_quality": "fair", "recommended_action": "This sound is close to \"Water\". Make the vocalization more distinct.", "confusable_with": "Water", "confusable_similarity": 0.9984}

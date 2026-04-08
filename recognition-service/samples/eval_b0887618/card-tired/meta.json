@@ -1,0 +1,1 @@
+{"label": "Tired", "id": "card-tired", "phrase_output": "I am tired", "vocalization_transcript": "ahr", "consistency_score": 0.9992, "prototype_threshold": 0.96, "margin_threshold": 0.14, "enrollment_quality": "fair", "recommended_action": "This sound is close to \"Food\". Make the vocalization more distinct.", "confusable_with": "Food", "confusable_similarity": 0.9933}

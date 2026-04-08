@@ -1,0 +1,1 @@
+{"label": "Demo", "id": "card-demo", "phrase_output": "Demo phrase", "vocalization_transcript": "ahr", "consistency_score": 1.0, "prototype_threshold": 0.95, "margin_threshold": 0.08, "enrollment_quality": "good", "recommended_action": null, "confusable_with": null, "confusable_similarity": 0.0}

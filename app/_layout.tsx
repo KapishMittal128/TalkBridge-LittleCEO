@@ -1,41 +1,53 @@
 import '../global.css';
 
 import { useEffect } from 'react';
-import { router, Stack } from 'expo-router';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { router, Stack, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
-import { useAuthStore } from '@/store/auth-store';
 import { useAppStore } from '@/store/app-store';
+import { Colors } from '@/constants/theme';
+import { AuthProvider, useAuth } from '@/contexts/AuthContext';
 
-// Keep splash screen visible while we resolve auth state.
 SplashScreen.preventAutoHideAsync();
 
-export default function RootLayout() {
-  const { initialize: initAuth, session, isLoading } = useAuthStore();
-  const { initialize: initApp, isHydrated, isOnboardingComplete } = useAppStore();
+function RootNavigator() {
+  const { user, isLoading } = useAuth();
+  const { initialize: initApp, isHydrated } = useAppStore();
+  const segments = useSegments();
 
   useEffect(() => {
-    void Promise.all([initAuth(), initApp()]);
-  }, [initAuth, initApp]);
+    void initApp();
+  }, [initApp]);
+
+  useEffect(() => {
+    void SplashScreen.hideAsync();
+  }, []);
 
   useEffect(() => {
     if (isLoading || !isHydrated) return;
 
-    SplashScreen.hideAsync();
+    const inAuthGroup = segments[0] === 'auth';
 
-    // --- Routing matrix ---
-    // Session=No,  Onboarding=No  → /auth/sign-in
-    // Session=No,  Onboarding=Yes → /auth/sign-in
-    // Session=Yes, Onboarding=No  → /onboarding
-    // Session=Yes, Onboarding=Yes → /(tabs)
-    if (!session) {
-      router.replace('/auth/sign-in');
-    } else if (!isOnboardingComplete) {
-      router.replace('/onboarding');
-    } else {
-      router.replace('/(tabs)');
+    if (!user) {
+      if (!inAuthGroup) {
+        router.replace('/auth/sign-in');
+      }
+      return;
     }
-  }, [isLoading, isHydrated, session, isOnboardingComplete]);
+
+    if (inAuthGroup || !segments[0]) {
+      router.replace('/');
+    }
+  }, [isHydrated, isLoading, segments, user]);
+
+  if (isLoading || !isHydrated) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color={Colors.primary} />
+      </View>
+    );
+  }
 
   return (
     <>
@@ -45,7 +57,24 @@ export default function RootLayout() {
         <Stack.Screen name="auth" />
         <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
       </Stack>
-      <StatusBar style="light" backgroundColor="#0F1117" />
+      <StatusBar style="dark" backgroundColor={Colors.background} />
     </>
   );
 }
+
+export default function RootLayout() {
+  return (
+    <AuthProvider>
+      <RootNavigator />
+    </AuthProvider>
+  );
+}
+
+const styles = StyleSheet.create({
+  loadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.background,
+  },
+});

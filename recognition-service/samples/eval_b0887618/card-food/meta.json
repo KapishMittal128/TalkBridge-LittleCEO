@@ -1,0 +1,1 @@
+{"label": "Food", "id": "card-food", "phrase_output": "I want food", "vocalization_transcript": "ah", "consistency_score": 0.9991, "prototype_threshold": 0.96, "margin_threshold": 0.14, "enrollment_quality": "fair", "recommended_action": "This sound is close to \"Water\". Make the vocalization more distinct.", "confusable_with": "Water", "confusable_similarity": 0.9973}

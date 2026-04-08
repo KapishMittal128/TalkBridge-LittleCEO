@@ -1,48 +1,86 @@
-import { useState, useEffect, useCallback } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TextInput,
+  ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
-  ActivityIndicator,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { router, useFocusEffect } from 'expo-router';
-import { Colors, FontSize, FontWeight, Spacing, Radius, TouchTarget, Motion } from '@/constants/theme';
+import { router } from 'expo-router';
+import Animated, { FadeInDown, FadeInUp, SlideInUp } from 'react-native-reanimated';
+import { PlusCircle, Sparkles, X } from 'lucide-react-native';
 import { useDataStore } from '@/store/data-store';
-import { X, PlusCircle, Sparkles } from 'lucide-react-native';
 import { AuroraBackground } from '@/components/ui/AuroraBackground';
 import { GlassPanel } from '@/components/ui/GlassPanel';
-import { SectionLabel } from '@/components/ui/SectionLabel';
-import Animated, { FadeInDown, SlideInUp, FadeInUp } from 'react-native-reanimated';
-import { CATEGORY_METADATA, DEFAULT_CATEGORY_COLOR } from '@/constants/categories';
+import { OnboardingStepCard } from '@/components/ui/OnboardingStepCard';
+import { SectionHeader } from '@/components/ui/SectionHeader';
+import { Colors, Layout, Motion, Radius, Spacing, Typography } from '@/constants/theme';
+import { getCategoryMeta } from '@/constants/categories';
 import { slugify } from '@/lib/slug';
 
 export default function ModalScreen() {
   const insets = useSafeAreaInsets();
-  const { categories, createCard, initializeData, isLoading } = useDataStore();
+  const { categories, createCard, createCategory, initializeData } = useDataStore();
   const [label, setLabel] = useState('');
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
+  const [categoryName, setCategoryName] = useState('');
+  const [showCategoryCreator, setShowCategoryCreator] = useState(false);
   const [saving, setSaving] = useState(false);
-
-  useFocusEffect(
-    useCallback(() => {
-      void initializeData();
-    }, [initializeData]),
-  );
+  const [creatingCategory, setCreatingCategory] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (categories.length > 0 && selectedCategoryId === null) {
+    void initializeData();
+  }, [initializeData]);
+
+  useEffect(() => {
+    if (!selectedCategoryId && categories[0]) {
       setSelectedCategoryId(categories[0].id);
     }
   }, [categories, selectedCategoryId]);
 
-  const handleSave = async () => {
+  useEffect(() => {
+    if (categories.length === 0) {
+      setShowCategoryCreator(true);
+    }
+  }, [categories.length]);
+
+  async function handleCreateCategory() {
+    const trimmed = categoryName.trim();
+    if (!trimmed) {
+      setSaveError('Please enter a category name first.');
+      return;
+    }
+
+    setCreatingCategory(true);
+    setSaveError(null);
+    try {
+      const category = await createCategory({
+        name: trimmed,
+        slug: slugify(trimmed),
+        sort_order: categories.length,
+      });
+      setCategoryName('');
+      setShowCategoryCreator(false);
+      setSelectedCategoryId(category.id);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unable to create category right now.';
+      setSaveError(message);
+    } finally {
+      setCreatingCategory(false);
+    }
+  }
+
+  async function handleSave() {
     const trimmed = label.trim();
     if (!trimmed || !selectedCategoryId) return;
+
     setSaving(true);
+    setSaveError(null);
     try {
       await createCard({
         category_id: selectedCategoryId,
@@ -52,131 +90,128 @@ export default function ModalScreen() {
       });
       setLabel('');
       router.back();
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unable to save this sound card right now.';
+      setSaveError(message);
+      Alert.alert('Could not save card', message);
     } finally {
       setSaving(false);
     }
-  };
+  }
 
   return (
     <AuroraBackground>
       <Animated.View
-        entering={SlideInUp.springify()
-          .damping(Motion.spring.gentle.damping)
-          .stiffness(Motion.spring.gentle.stiffness)}
-        style={[styles.container, { paddingTop: insets.top + Spacing.md }]}
+        entering={SlideInUp.springify().damping(Motion.spring.gentle.damping)}
+        style={[
+          styles.container,
+          {
+            paddingTop: insets.top + Spacing.md,
+            paddingBottom: insets.bottom + Spacing.lg,
+          },
+        ]}
       >
-        <Animated.View entering={FadeInDown.springify().delay(120)} style={styles.header}>
-          <View style={styles.headerTop}>
-            <View style={styles.heroIcon}>
-              <Sparkles size={22} color={Colors.primary} />
-            </View>
-            <Pressable
-              onPress={() => router.back()}
-              style={({ pressed }) => [
-                styles.closeButton,
-                pressed && { opacity: 0.75, transform: [{ scale: 0.94 }] },
-              ]}
-            >
-              <X size={22} color={Colors.textSecondary} />
-            </Pressable>
+        <Animated.View entering={FadeInDown.delay(100).springify()} style={styles.headerRow}>
+          <View style={styles.headerBadge}>
+            <Sparkles size={18} color={Colors.primary} />
           </View>
-          <SectionLabel
-            eyebrow="Create"
-            title="New sound card"
-            subtitle="This phrase is what TalkBridge speaks after your voice matches this card."
-            style={{ marginBottom: 0 }}
-          />
+          <Pressable style={styles.closeButton} onPress={() => router.back()}>
+            <X size={18} color={Colors.textSecondary} />
+          </Pressable>
         </Animated.View>
 
-        {isLoading && categories.length === 0 ? (
-          <View style={styles.loadingWrap}>
-            <ActivityIndicator size="large" color={Colors.primary} />
-            <Text style={styles.loadingCap}>Loading categories…</Text>
-          </View>
-        ) : (
-          <ScrollView
-            style={styles.form}
-            contentContainerStyle={styles.formContent}
-            showsVerticalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled"
-          >
-            <GlassPanel variant="elevated" padding={Spacing.xl} style={styles.formPanel}>
-              <View style={styles.inputGroup}>
-                <Text style={styles.label}>Phrase</Text>
-                <View style={styles.inputWrapper}>
-                  <TextInput
-                    style={styles.textInput}
-                    placeholder="e.g. I need a break"
-                    placeholderTextColor={Colors.textMuted}
-                    value={label}
-                    onChangeText={setLabel}
-                    multiline
-                  />
-                </View>
-              </View>
+        <SectionHeader
+          eyebrow="Create voice tile"
+          title="Add a phrase with intention"
+          subtitle="This phrase becomes part of the communication library, then you can train TalkBridge to recognize the sound that means it."
+          style={styles.titleBlock}
+        />
 
-              <View style={styles.inputGroup}>
-                <Text style={styles.label}>Category</Text>
-                <View style={styles.categoryPicker}>
-                  {categories.map((cat) => {
-                    const meta = CATEGORY_METADATA[cat.slug] || { color: DEFAULT_CATEGORY_COLOR };
-                    const isSelected = selectedCategoryId === cat.id;
-
-                    return (
-                      <Pressable
-                        key={cat.id}
-                        style={[
-                          styles.categoryOption,
-                          isSelected && {
-                            borderColor: meta.color,
-                            backgroundColor: `${meta.color}18`,
-                          },
-                        ]}
-                        onPress={() => setSelectedCategoryId(cat.id)}
-                      >
-                        <View style={[styles.catDot, { backgroundColor: meta.color }]} />
-                        <Text
-                          style={[
-                            styles.categoryOptionText,
-                            isSelected && { color: Colors.textPrimary, fontWeight: FontWeight.bold },
-                          ]}
-                        >
-                          {cat.name}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-
-              <View style={styles.hintBox}>
-                <Text style={styles.hint}>
-                  Then open the Bank → choose this category → tap TRAIN and record three clean samples.
-                </Text>
-              </View>
-            </GlassPanel>
-          </ScrollView>
-        )}
-
-        <Animated.View
-          entering={FadeInUp.springify().delay(400).damping(Motion.spring.snappy.damping)}
-          style={[styles.footer, { paddingBottom: insets.bottom + Spacing.lg }]}
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={styles.scrollContent}
         >
+          <GlassPanel variant="elevated" radius={Radius.panel} padding={Spacing.xl} style={styles.inputPanel}>
+            <Text style={styles.fieldLabel}>Phrase output</Text>
+            <TextInput
+              style={styles.input}
+              value={label}
+              onChangeText={setLabel}
+              placeholder="For example: I need a break"
+              placeholderTextColor={Colors.textDisabled}
+              multiline
+            />
+            <Text style={styles.helperText}>Use the exact phrase you want spoken aloud after recognition.</Text>
+          </GlassPanel>
+
+          <View style={styles.categoryHeader}>
+            <View style={styles.categoryHeaderRow}>
+              <Text style={styles.fieldLabel}>Choose a category</Text>
+              <Pressable onPress={() => setShowCategoryCreator((value) => !value)}>
+                <Text style={styles.createCategoryLink}>
+                  {showCategoryCreator ? 'Close' : 'New category'}
+                </Text>
+              </Pressable>
+            </View>
+            <Text style={styles.helperInline}>This controls the card&apos;s visual identity and placement.</Text>
+          </View>
+
+          {showCategoryCreator ? (
+            <GlassPanel variant="ghost" radius={Radius.card} padding={Spacing.lg} style={styles.categoryCreatorPanel}>
+              <TextInput
+                style={styles.categoryInput}
+                value={categoryName}
+                onChangeText={setCategoryName}
+                placeholder="For example: Comfort"
+                placeholderTextColor={Colors.textDisabled}
+              />
+              <Pressable
+                style={[styles.categoryCreateButton, creatingCategory && styles.disabledButton]}
+                onPress={() => void handleCreateCategory()}
+                disabled={creatingCategory}
+              >
+                {creatingCategory ? (
+                  <ActivityIndicator color={Colors.textInverse} />
+                ) : (
+                  <Text style={styles.categoryCreateButtonText}>Create category</Text>
+                )}
+              </Pressable>
+            </GlassPanel>
+          ) : null}
+
+          <View style={styles.categoryStack}>
+            {categories.map((category, index) => {
+              const meta = getCategoryMeta(category.slug);
+              return (
+                <Animated.View key={category.id} entering={FadeInUp.delay(index * Motion.choreography.microStagger).springify()}>
+                  <OnboardingStepCard
+                    title={category.name}
+                    subtitle={meta.description}
+                    icon={meta.icon}
+                    active={selectedCategoryId === category.id}
+                    onPress={() => setSelectedCategoryId(category.id)}
+                  />
+                </Animated.View>
+              );
+            })}
+          </View>
+
+          {saveError ? <Text style={styles.errorText}>{saveError}</Text> : null}
+        </ScrollView>
+
+        <Animated.View entering={FadeInUp.delay(250).springify()} style={styles.footer}>
           <Pressable
-            style={({ pressed }) => [
-              styles.saveButton,
-              pressed && { transform: [{ scale: 0.99 }] },
-              (!label.trim() || !selectedCategoryId || saving) && styles.saveButtonDisabled,
-            ]}
-            onPress={handleSave}
+            style={[styles.primaryButton, (!label.trim() || !selectedCategoryId || saving) && styles.disabledButton]}
+            onPress={() => void handleSave()}
             disabled={!label.trim() || !selectedCategoryId || saving}
           >
             {saving ? (
-              <ActivityIndicator color={Colors.background} />
+              <ActivityIndicator color={Colors.textInverse} />
             ) : (
               <>
-                <PlusCircle size={22} color={Colors.background} />
-                <Text style={styles.saveButtonText}>Create sound card</Text>
+                <PlusCircle size={18} color={Colors.textInverse} />
+                <Text style={styles.primaryButtonText}>Create sound card</Text>
               </>
             )}
           </Pressable>
@@ -189,144 +224,136 @@ export default function ModalScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    paddingHorizontal: Layout.screenPadding,
   },
-  header: {
-    paddingHorizontal: Spacing.xl,
-    paddingBottom: Spacing.lg,
-  },
-  headerTop: {
+  headerRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: Spacing.lg,
   },
-  heroIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 16,
-    backgroundColor: 'rgba(0, 242, 255, 0.1)',
+  headerBadge: {
+    width: 42,
+    height: 42,
+    borderRadius: 18,
+    backgroundColor: 'rgba(54,215,255,0.12)',
     borderWidth: 1,
-    borderColor: Colors.strokeStrong,
+    borderColor: 'rgba(54,215,255,0.24)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   closeButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: Colors.surfaceHighlight,
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(255,255,255,0.04)',
     borderWidth: 1,
-    borderColor: Colors.glassBorder,
-  },
-  loadingWrap: {
-    flex: 1,
-    justifyContent: 'center',
+    borderColor: Colors.glassBorderSubtle,
     alignItems: 'center',
-    gap: Spacing.md,
+    justifyContent: 'center',
   },
-  loadingCap: {
-    color: Colors.textSecondary,
-    fontSize: FontSize.sm,
+  titleBlock: {
+    marginBottom: Spacing.lg,
   },
-  form: {
-    flex: 1,
+  scrollContent: {
+    paddingBottom: Spacing.xl,
   },
-  formContent: {
-    paddingHorizontal: Spacing.xl,
-    paddingBottom: Spacing['2xl'],
-  },
-  formPanel: {
+  inputPanel: {
     marginBottom: Spacing.xl,
   },
-  inputGroup: {
-    marginBottom: Spacing['2xl'],
-  },
-  label: {
-    fontSize: FontSize.xs,
-    fontWeight: FontWeight.bold,
-    color: Colors.textMuted,
+  fieldLabel: {
+    ...Typography.microLabel,
+    color: Colors.textSecondary,
+    letterSpacing: 0.4,
     marginBottom: Spacing.sm,
-    letterSpacing: 1.2,
-    textTransform: 'uppercase',
   },
-  inputWrapper: {
-    backgroundColor: Colors.surfaceHighlight,
+  input: {
+    minHeight: 112,
     borderRadius: Radius.md,
+    backgroundColor: 'rgba(255,255,255,0.04)',
     borderWidth: 1,
-    borderColor: Colors.strokeStrong,
-    minHeight: TouchTarget.comfortable,
-  },
-  textInput: {
+    borderColor: Colors.glassBorderSubtle,
     paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.md,
+    paddingVertical: Spacing.lg,
     color: Colors.textPrimary,
-    fontSize: FontSize.lg,
+    fontSize: 18,
     lineHeight: 24,
+    textAlignVertical: 'top',
   },
-  categoryPicker: {
-    gap: Spacing.sm,
+  helperText: {
+    ...Typography.supportText,
+    marginTop: Spacing.md,
   },
-  categoryOption: {
+  categoryHeader: {
+    marginBottom: Spacing.md,
+  },
+  categoryHeaderRow: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: Spacing.md,
-    backgroundColor: Colors.surfaceHighlight,
-    paddingHorizontal: Spacing.lg,
-    paddingVertical: 14,
+  },
+  helperInline: {
+    ...Typography.supportText,
+    fontSize: 13,
+  },
+  createCategoryLink: {
+    ...Typography.microLabel,
+    color: Colors.primary,
+    textTransform: 'none',
+    letterSpacing: 0,
+  },
+  categoryCreatorPanel: {
+    marginBottom: Spacing.md,
+  },
+  categoryInput: {
+    minHeight: 48,
     borderRadius: Radius.md,
+    backgroundColor: 'rgba(255,255,255,0.04)',
     borderWidth: 1,
-    borderColor: Colors.glassBorder,
+    borderColor: Colors.glassBorderSubtle,
+    paddingHorizontal: Spacing.lg,
+    color: Colors.textPrimary,
+    fontSize: 15,
+    marginBottom: Spacing.md,
   },
-  catDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+  categoryCreateButton: {
+    minHeight: 46,
+    borderRadius: Radius.md,
+    backgroundColor: Colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  categoryOptionText: {
-    fontSize: FontSize.base,
-    color: Colors.textSecondary,
-    flex: 1,
+  categoryCreateButtonText: {
+    color: Colors.textInverse,
+    fontSize: 15,
+    fontWeight: '700',
   },
-  hintBox: {
-    padding: Spacing.md,
-    borderRadius: Radius.sm,
-    backgroundColor: 'rgba(56, 226, 177, 0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(56, 226, 177, 0.2)',
+  categoryStack: {
+    gap: Spacing.md,
   },
-  hint: {
-    fontSize: FontSize.sm,
-    color: Colors.textSecondary,
-    lineHeight: 21,
+  errorText: {
+    ...Typography.supportText,
+    color: Colors.warmth,
+    marginTop: Spacing.lg,
   },
   footer: {
-    paddingHorizontal: Spacing.xl,
-    paddingTop: Spacing.md,
+    marginTop: 'auto',
   },
-  saveButton: {
-    backgroundColor: Colors.primary,
-    height: TouchTarget.comfortable,
+  primaryButton: {
+    minHeight: 58,
     borderRadius: Radius.lg,
-    flexDirection: 'row',
-    justifyContent: 'center',
+    backgroundColor: Colors.primary,
     alignItems: 'center',
-    gap: 10,
-    shadowColor: Colors.primary,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.35,
-    shadowRadius: 16,
-    elevation: 10,
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
   },
-  saveButtonText: {
-    fontSize: FontSize.lg,
-    fontWeight: FontWeight.bold,
-    color: Colors.background,
+  primaryButtonText: {
+    color: Colors.textInverse,
+    fontSize: 17,
+    fontWeight: '700',
   },
-  saveButtonDisabled: {
-    backgroundColor: Colors.textMuted,
-    shadowOpacity: 0,
-    elevation: 0,
+  disabledButton: {
+    opacity: 0.35,
   },
 });

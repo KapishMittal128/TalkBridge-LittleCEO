@@ -15,7 +15,7 @@ export default function TabLayout() {
       tabBar={(props) => <FloatingBottomNav {...props} />}
       screenOptions={{
         headerShown: false,
-        tabBarStyle: { position: 'absolute' }, // Allow content to render behind the bar
+        tabBarStyle: { position: 'absolute' },
       }}
     >
       <Tabs.Screen
@@ -27,7 +27,14 @@ export default function TabLayout() {
       <Tabs.Screen
         name="categories"
         options={{
-          title: 'Categories',
+          title: 'Train',
+        }}
+      />
+      <Tabs.Screen
+        name="add"
+        options={{
+          title: 'Add',
+          href: null,
         }}
       />
       <Tabs.Screen
@@ -37,15 +44,9 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="add"
-        options={{
-          href: null,
-        }}
-      />
-      <Tabs.Screen
         name="settings"
         options={{
-          href: null,
+          title: 'Profile',
         }}
       />
     </Tabs>

@@ -1,0 +1,1 @@
+{"label": "Water", "id": "card-water", "phrase_output": "I want water", "vocalization_transcript": "ah", "consistency_score": 0.9987, "prototype_threshold": 0.74, "margin_threshold": 0.08, "enrollment_quality": "good", "distinctiveness_status": "good", "recommended_action": null, "confusable_with": null, "confusable_similarity": 0.0, "updated_at": 1775502841.7393763}

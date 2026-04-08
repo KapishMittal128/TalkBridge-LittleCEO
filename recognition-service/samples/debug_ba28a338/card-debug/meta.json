@@ -1,0 +1,1 @@
+{"label": "Debug Card", "id": "card-debug", "phrase_output": "Debug phrase", "vocalization_transcript": "hoor", "consistency_score": 0.9851, "prototype_threshold": 0.8251, "margin_threshold": 0.05, "enrollment_quality": "poor", "recommended_action": "Record three clean, consistent takes to calibrate this phrase.", "confusable_with": null, "confusable_similarity": 0.0}

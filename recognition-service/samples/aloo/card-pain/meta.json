@@ -1,0 +1,1 @@
+{"label": "Pain", "id": "card-pain", "phrase_output": "I am in pain", "vocalization_transcript": "hahr", "consistency_score": 0.9874, "prototype_threshold": 0.8274, "margin_threshold": 0.08, "enrollment_quality": "fair", "recommended_action": "This sound is close to \"Water\". Make the vocalization more distinct.", "confusable_with": "Water", "confusable_similarity": 0.999}

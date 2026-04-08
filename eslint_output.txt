@@ -1,0 +1,20 @@
+﻿
+C:\Users\Kapish\Downloads\TalkBridge\TalkBridge\.expo\types\router.d.ts
+  1:1  warning  Unused eslint-disable directive (no problems were reported)
+
+C:\Users\Kapish\Downloads\TalkBridge\TalkBridge\constants\categories.ts
+  2:3  warning  'AlertTriangle' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\Kapish\Downloads\TalkBridge\TalkBridge\contexts\AuthContext.tsx
+  384:5  warning  React Hook useMemo has a missing dependency: 'updateProfile'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+C:\Users\Kapish\Downloads\TalkBridge\TalkBridge\recognition-service\venv\Lib\site-packages\sklearn\utils\_repr_html\estimator.js
+    1:10  warning  'copyToClipboard' is defined but never used  no-unused-vars
+  106:10  warning  'forceTheme' is defined but never used       no-unused-vars
+
+C:\Users\Kapish\Downloads\TalkBridge\TalkBridge\recognition-service\venv\Lib\site-packages\urllib3\contrib\emscripten\emscripten_fetch_worker.js
+  72:7  error  Unexpected var, use let or const instead  no-var
+
+Γ£û 6 problems (1 error, 5 warnings)
+  1 error and 1 warning potentially fixable with the `--fix` option.
+
