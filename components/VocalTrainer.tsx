@@ -29,9 +29,11 @@ import Animated, {
 import { CheckCircle2, Mic, Play, RefreshCcw, Sparkles, Volume2, X } from 'lucide-react-native';
 import {
   checkBackendHealth,
+  fetchCardDebugAnalysis,
   fetchTrainingSamples,
   getTrainingSamplePlaybackSource,
   uploadTrainingSample,
+  type CardDebugAnalysis,
   type TrainingResponse,
   type TrainingSampleInfo,
 } from '@/lib/recognition';
@@ -285,6 +287,8 @@ export function VocalTrainer({ isVisible, onClose, soundCard, backendAvailable =
     soundCard.distinctiveness_status ?? null,
   );
   const [trainerHint, setTrainerHint] = useState<string | null>(soundCard.recommended_action ?? null);
+  const [cardDebugAnalysis, setCardDebugAnalysis] = useState<CardDebugAnalysis | null>(null);
+  const [isLoadingDebugAnalysis, setIsLoadingDebugAnalysis] = useState(false);
 
   const updateCardTrainingStatus = useDataStore((state) => state.updateCardTrainingStatus);
   const categories = useDataStore((state) => state.categories);
@@ -357,6 +361,23 @@ export function VocalTrainer({ isVisible, onClose, soundCard, backendAvailable =
     playbackObjectUrlRef.current = null;
   }, []);
 
+  const hydrateDebugAnalysis = useCallback(async () => {
+    if (!__DEV__) {
+      setCardDebugAnalysis(null);
+      return;
+    }
+
+    setIsLoadingDebugAnalysis(true);
+    try {
+      const debugAnalysis = await fetchCardDebugAnalysis(soundCard.id);
+      setCardDebugAnalysis(debugAnalysis);
+    } catch {
+      setCardDebugAnalysis(null);
+    } finally {
+      setIsLoadingDebugAnalysis(false);
+    }
+  }, [soundCard.id]);
+
   const hydrateSamples = useCallback(
     async (keepSelection?: number) => {
       setIsLoadingSamples(true);
@@ -366,13 +387,14 @@ export function VocalTrainer({ isVisible, onClose, soundCard, backendAvailable =
         setSamples(remoteSamples);
         setSavedSampleCount(remoteSamples.length);
         setSelectedSampleIndex(keepSelection ?? getNextSampleIndex(remoteSamples));
+        void hydrateDebugAnalysis();
       } catch (error) {
         setTrainerError(error instanceof Error ? error.message : 'Saved samples could not be loaded.');
       } finally {
         setIsLoadingSamples(false);
       }
     },
-    [soundCard.id],
+    [hydrateDebugAnalysis, soundCard.id],
   );
 
   useEffect(() => {
@@ -395,6 +417,7 @@ export function VocalTrainer({ isVisible, onClose, soundCard, backendAvailable =
     setEnrollmentQuality(soundCard.enrollment_quality ?? null);
     setDistinctivenessStatus(soundCard.distinctiveness_status ?? null);
     setTrainerHint(soundCard.recommended_action ?? null);
+    setCardDebugAnalysis(null);
     useAudioStore.getState().reset();
 
     void checkBackendHealth().then(setBackendOk).catch(() => setBackendOk(false));
@@ -533,6 +556,7 @@ export function VocalTrainer({ isVisible, onClose, soundCard, backendAvailable =
         ? preserveSelection
         : getNextSampleIndex(remoteSamples),
     );
+    void hydrateDebugAnalysis();
 
     await updateCardTrainingStatus(soundCard.id, getTrainingStatus(nextCount), nextCount, {
       enrollment_quality: response.enrollment_quality,
@@ -777,6 +801,35 @@ export function VocalTrainer({ isVisible, onClose, soundCard, backendAvailable =
                   <Text style={styles.readinessText}>Recognition readiness: {readinessText}</Text>
                 ) : null}
                 {trainerHint ? <Text style={styles.hintText}>{trainerHint}</Text> : null}
+                {__DEV__ ? (
+                  <View style={styles.debugPanel}>
+                    <Text style={styles.debugTitle}>Developer analysis</Text>
+                    {isLoadingDebugAnalysis ? <ActivityIndicator color={Colors.primary} /> : null}
+                    {cardDebugAnalysis ? (
+                      <>
+                        <Text style={styles.debugLine}>
+                          {cardDebugAnalysis.readiness} · similarity {cardDebugAnalysis.similarityThreshold.toFixed(2)} ·
+                          margin {cardDebugAnalysis.marginThreshold.toFixed(2)}
+                        </Text>
+                        <Text style={styles.debugLine}>
+                          Consistency {cardDebugAnalysis.consistencyScore.toFixed(2)} · samples {cardDebugAnalysis.sampleCount}/{cardDebugAnalysis.sampleCap}
+                        </Text>
+                        {cardDebugAnalysis.confusableCards.slice(0, 2).map((item) => (
+                          <Text key={`${item.label}-${item.score}`} style={styles.debugLine}>
+                            Close to {item.label}: {(item.score * 100).toFixed(1)}%
+                          </Text>
+                        ))}
+                        {cardDebugAnalysis.samples.slice(0, 3).map((sample) => (
+                          <Text key={`sample-debug-${sample.sampleIndex}`} style={styles.debugLine}>
+                            Sample {sample.sampleIndex} · {sample.source ?? 'manual'} · {sample.duration?.toFixed(2) ?? '0.00'}s
+                          </Text>
+                        ))}
+                      </>
+                    ) : (
+                      <Text style={styles.debugLine}>No debug analysis available yet.</Text>
+                    )}
+                  </View>
+                ) : null}
               </View>
 
               <View style={styles.samplePanel}>
@@ -1596,5 +1649,25 @@ const styles = StyleSheet.create({
     color: Colors.emergency,
     marginTop: Spacing.lg,
     textAlign: 'center',
+  },
+  debugPanel: {
+    marginTop: Spacing.md,
+    padding: Spacing.md,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.strokeMuted,
+    backgroundColor: Colors.surfaceMuted,
+    gap: 6,
+  },
+  debugTitle: {
+    ...Typography.microLabel,
+    color: Colors.textPrimary,
+    letterSpacing: 0.4,
+  },
+  debugLine: {
+    ...Typography.supportText,
+    color: Colors.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
   },
 });

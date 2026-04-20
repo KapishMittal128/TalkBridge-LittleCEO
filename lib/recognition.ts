@@ -186,17 +186,45 @@ async function throwApiError(response: Response, fallbackMessage: string): Promi
 }
 
 export interface RecognitionResult {
+  predictedCard?: string | 'unknown';
   match_label: string | null;
   sound_card_id: string | null;
   confidence: number;
   phrase_output: string | null;
+  accepted?: boolean;
+  reason?: string | null;
   message?: string;
   decision_source?: 'hybrid_acoustic_match' | 'prototype_acoustic_fallback';
   best_similarity?: number;
   second_best_similarity?: number | null;
   support_score?: number;
   active_signal_count?: number;
-  rejection_reason?: 'below_threshold' | 'low_margin' | 'no_samples' | null;
+  topMatches?: TopMatch[];
+  debug?: RecognitionDebugPayload;
+  rejection_reason?: 'below_threshold' | 'low_margin' | 'no_samples' | 'low_signal' | null;
+}
+
+export interface TopMatch {
+  label: string;
+  score: number;
+  soundCardId: string;
+  readiness: 'low_data' | 'learning' | 'mature';
+  sampleCount?: number;
+}
+
+export interface RecognitionDebugPayload {
+  accepted: boolean;
+  reason?: string | null;
+  audioQuality?: Record<string, number>;
+  preprocessing?: Record<string, unknown>;
+  featureSummary?: Record<string, number>;
+  mfccSummary?: number[];
+  rmsSummary?: number[];
+  zcrSummary?: number[];
+  pitchSummary?: number[];
+  waveformPreview?: number[];
+  featureQualityFlags?: string[];
+  topMatches?: Array<Record<string, unknown>>;
 }
 
 export interface TrainingResponse {
@@ -204,6 +232,8 @@ export interface TrainingResponse {
   sound_card_id: string;
   sample_count: number;
   sample_index?: number;
+  readiness?: 'low_data' | 'learning' | 'mature';
+  sample_cap?: number;
   enrollment_quality?: 'poor' | 'fair' | 'good';
   distinctiveness_status?: 'good' | 'close' | 'poor';
   consistency_score?: number;
@@ -215,10 +245,15 @@ export interface TrainedCardResponse {
   label?: string;
   phrase_output?: string;
   sample_count?: number;
+  readiness?: 'low_data' | 'learning' | 'mature';
+  sample_cap?: number;
+  similarity_threshold?: number;
+  margin_threshold?: number;
   enrollment_quality?: 'poor' | 'fair' | 'good';
   distinctiveness_status?: 'good' | 'close' | 'poor';
   consistency_score?: number;
   recommended_action?: string | null;
+  confusable_cards?: Array<{ label: string; score: number; sound_card_id?: string }>;
 }
 
 export interface TrainingSampleInfo {
@@ -228,6 +263,46 @@ export interface TrainingSampleInfo {
   duration_seconds?: number | null;
   created_at?: number | null;
   playback_path: string;
+  source?: 'manual' | 'confirmed_match' | 'corrected_match';
+  quality_summary?: Record<string, number>;
+  feature_quality_flags?: string[];
+}
+
+export interface CardDebugAnalysis {
+  soundCardId: string;
+  label: string;
+  phraseOutput: string;
+  sampleCount: number;
+  readiness: 'low_data' | 'learning' | 'mature';
+  sampleCap: number;
+  featureBundleVersion: number;
+  similarityThreshold: number;
+  marginThreshold: number;
+  consistencyScore: number;
+  recommendedAction?: string | null;
+  confusableCards: Array<{ sound_card_id?: string; label: string; score: number }>;
+  samples: Array<{
+    sampleIndex: number;
+    source?: string;
+    createdAt?: number;
+    duration?: number;
+    qualitySummary?: Record<string, number>;
+    featureQualityFlags?: string[];
+  }>;
+}
+
+export interface RecognitionEvaluation {
+  sampleCount: number;
+  acceptedAccuracy: number;
+  rejectionRate: number;
+  mostConfusableCards: Array<{ cards: string[]; count: number }>;
+  evaluations: Array<{
+    expected: string;
+    predicted: string;
+    accepted: boolean;
+    reason?: string | null;
+    confidence?: number;
+  }>;
 }
 
 async function getAuthorizedHeaders() {
@@ -291,6 +366,15 @@ export async function fetchTrainedCards(_username?: string): Promise<TrainedCard
       label: typeof card?.label === 'string' ? card.label : undefined,
       phrase_output: typeof card?.phrase_output === 'string' ? card.phrase_output : undefined,
       sample_count: Number.isFinite(Number(card?.sample_count)) ? Number(card.sample_count) : undefined,
+      readiness:
+        card?.readiness === 'low_data' || card?.readiness === 'learning' || card?.readiness === 'mature'
+          ? card.readiness
+          : undefined,
+      sample_cap: Number.isFinite(Number(card?.sample_cap)) ? Number(card.sample_cap) : undefined,
+      similarity_threshold:
+        Number.isFinite(Number(card?.similarity_threshold)) ? Number(card.similarity_threshold) : undefined,
+      margin_threshold:
+        Number.isFinite(Number(card?.margin_threshold)) ? Number(card.margin_threshold) : undefined,
       enrollment_quality:
         card?.enrollment_quality === 'poor' || card?.enrollment_quality === 'fair' || card?.enrollment_quality === 'good'
           ? card.enrollment_quality
@@ -305,6 +389,15 @@ export async function fetchTrainedCards(_username?: string): Promise<TrainedCard
         Number.isFinite(Number(card?.consistency_score)) ? Number(card.consistency_score) : undefined,
       recommended_action:
         typeof card?.recommended_action === 'string' ? card.recommended_action : null,
+      confusable_cards: Array.isArray(card?.confusable_cards)
+        ? card.confusable_cards
+            .filter(isRecord)
+            .map((item) => ({
+              label: typeof item.label === 'string' ? item.label : '',
+              score: Number.isFinite(Number(item.score)) ? Number(item.score) : 0,
+              sound_card_id: typeof item.sound_card_id === 'string' ? item.sound_card_id : undefined,
+            }))
+        : undefined,
     }));
   } catch (error) {
     console.error("[Recognition] fetchTrainedCards error:", error);
@@ -321,6 +414,7 @@ export async function uploadTrainingSample(
   label: string,
   phraseOutput: string,
   sampleIndex: number,
+  sampleSource: 'manual' | 'confirmed_match' | 'corrected_match' = 'manual',
 ): Promise<TrainingResponse> {
   const formData = new FormData();
   const headers = await getAuthorizedHeaders();
@@ -346,6 +440,7 @@ export async function uploadTrainingSample(
   formData.append('label', label);
   formData.append('phrase_output', phraseOutput);
   formData.append('sample_index', String(sampleIndex));
+  formData.append('sample_source', sampleSource);
 
   const response = await fetchApiWithFallback('/train-sample', {
     method: 'POST',
@@ -377,6 +472,11 @@ export async function uploadTrainingSample(
     sound_card_id: returnedCardId,
     sample_count: sampleCount,
     sample_index: Number.isFinite(Number(payload.sample_index)) ? Number(payload.sample_index) : undefined,
+    readiness:
+      payload.readiness === 'low_data' || payload.readiness === 'learning' || payload.readiness === 'mature'
+        ? payload.readiness
+        : undefined,
+    sample_cap: Number.isFinite(Number(payload.sample_cap)) ? Number(payload.sample_cap) : undefined,
     enrollment_quality:
       payload.enrollment_quality === 'poor' || payload.enrollment_quality === 'fair' || payload.enrollment_quality === 'good'
         ? payload.enrollment_quality
@@ -430,12 +530,34 @@ export async function predictVocalSound(uri: string): Promise<RecognitionResult>
   }
 
   const payload = await parseJson(response);
+  const topMatches = Array.isArray(payload.topMatches)
+    ? payload.topMatches.filter(isRecord).map((item) => {
+        const readiness: TopMatch['readiness'] =
+          item.readiness === 'low_data' || item.readiness === 'learning' || item.readiness === 'mature'
+            ? item.readiness
+            : 'low_data';
+
+        return {
+          label: typeof item.label === 'string' ? item.label : '',
+          score: Number.isFinite(Number(item.score)) ? Number(item.score) : 0,
+          soundCardId: typeof item.soundCardId === 'string' ? item.soundCardId : '',
+          readiness,
+          sampleCount: Number.isFinite(Number(item.sampleCount)) ? Number(item.sampleCount) : undefined,
+        };
+      })
+    : [];
 
   return {
+    predictedCard:
+      payload.predictedCard === 'unknown' || typeof payload.predictedCard === 'string'
+        ? payload.predictedCard
+        : undefined,
     match_label: typeof payload.match_label === 'string' ? payload.match_label : null,
     sound_card_id: typeof payload.sound_card_id === 'string' ? payload.sound_card_id : null,
     confidence: normalizeConfidence(payload.confidence),
     phrase_output: typeof payload.phrase_output === 'string' ? payload.phrase_output : null,
+    accepted: typeof payload.accepted === 'boolean' ? payload.accepted : undefined,
+    reason: typeof payload.reason === 'string' ? payload.reason : null,
     message: typeof payload.message === 'string' ? payload.message : undefined,
     decision_source:
       payload.decision_source === 'hybrid_acoustic_match' || payload.decision_source === 'prototype_acoustic_fallback'
@@ -453,10 +575,50 @@ export async function predictVocalSound(uri: string): Promise<RecognitionResult>
       Number.isFinite(Number(payload.support_score)) ? Number(payload.support_score) : undefined,
     active_signal_count:
       Number.isFinite(Number(payload.active_signal_count)) ? Number(payload.active_signal_count) : undefined,
+    topMatches,
+    debug: isRecord(payload.debug)
+      ? {
+          accepted: payload.debug.accepted === true,
+          reason: typeof payload.debug.reason === 'string' ? payload.debug.reason : null,
+          audioQuality: isRecord(payload.debug.audioQuality)
+            ? Object.fromEntries(
+                Object.entries(payload.debug.audioQuality).filter(([, value]) => Number.isFinite(Number(value))),
+              ) as Record<string, number>
+            : undefined,
+          preprocessing: isRecord(payload.debug.preprocessing) ? payload.debug.preprocessing : undefined,
+          featureSummary: isRecord(payload.debug.featureSummary)
+            ? Object.fromEntries(
+                Object.entries(payload.debug.featureSummary).filter(([, value]) => Number.isFinite(Number(value))),
+              ) as Record<string, number>
+            : undefined,
+          mfccSummary: Array.isArray(payload.debug.mfccSummary)
+            ? payload.debug.mfccSummary.map(Number).filter(Number.isFinite)
+            : undefined,
+          rmsSummary: Array.isArray(payload.debug.rmsSummary)
+            ? payload.debug.rmsSummary.map(Number).filter(Number.isFinite)
+            : undefined,
+          zcrSummary: Array.isArray(payload.debug.zcrSummary)
+            ? payload.debug.zcrSummary.map(Number).filter(Number.isFinite)
+            : undefined,
+          pitchSummary: Array.isArray(payload.debug.pitchSummary)
+            ? payload.debug.pitchSummary.map(Number).filter(Number.isFinite)
+            : undefined,
+          waveformPreview: Array.isArray(payload.debug.waveformPreview)
+            ? payload.debug.waveformPreview.map(Number).filter(Number.isFinite)
+            : undefined,
+          featureQualityFlags: Array.isArray(payload.debug.featureQualityFlags)
+            ? payload.debug.featureQualityFlags.filter((item): item is string => typeof item === 'string')
+            : undefined,
+          topMatches: Array.isArray(payload.debug.topMatches)
+            ? payload.debug.topMatches.filter(isRecord)
+            : undefined,
+        }
+      : undefined,
     rejection_reason:
       payload.rejection_reason === 'below_threshold' ||
       payload.rejection_reason === 'low_margin' ||
-      payload.rejection_reason === 'no_samples'
+      payload.rejection_reason === 'no_samples' ||
+      payload.rejection_reason === 'low_signal'
         ? payload.rejection_reason
         : null,
   };
@@ -511,6 +673,18 @@ export async function fetchTrainingSamples(soundCardId: string): Promise<Trainin
       typeof sample.playback_path === 'string'
         ? sample.playback_path
         : `/cards/${encodeURIComponent(soundCardId)}/samples/${Number(sample.sample_index)}/audio`,
+    source:
+      sample.source === 'manual' || sample.source === 'confirmed_match' || sample.source === 'corrected_match'
+        ? sample.source
+        : undefined,
+    quality_summary: isRecord(sample.quality_summary)
+      ? Object.fromEntries(
+          Object.entries(sample.quality_summary).filter(([, value]) => Number.isFinite(Number(value))),
+        ) as Record<string, number>
+      : undefined,
+    feature_quality_flags: Array.isArray(sample.feature_quality_flags)
+      ? sample.feature_quality_flags.filter((item): item is string => typeof item === 'string')
+      : undefined,
   }));
 }
 
@@ -573,17 +747,8 @@ export async function appendConfirmedMatchSample(params: {
   maxSamples?: number;
 }): Promise<TrainingResponse | null> {
   const samples = await fetchTrainingSamples(params.soundCardId);
-  const maxSamples = params.maxSamples ?? 8;
-
-  if (samples.length >= maxSamples) {
-    return null;
-  }
-
-  const usedIndexes = new Set(samples.map((sample) => sample.sample_index));
-  let nextSampleIndex = 1;
-  while (usedIndexes.has(nextSampleIndex)) {
-    nextSampleIndex += 1;
-  }
+  const maxSamples = params.maxSamples ?? 20;
+  const nextSampleIndex = chooseTrainingSampleIndex(samples, maxSamples);
 
   return uploadTrainingSample(
     params.uri,
@@ -591,7 +756,142 @@ export async function appendConfirmedMatchSample(params: {
     params.label,
     params.phraseOutput,
     nextSampleIndex,
+    'confirmed_match',
   );
+}
+
+function chooseTrainingSampleIndex(samples: TrainingSampleInfo[], maxSamples = 20) {
+  const usedIndexes = new Set(samples.map((sample) => sample.sample_index));
+  for (let index = 1; index <= maxSamples; index += 1) {
+    if (!usedIndexes.has(index)) {
+      return index;
+    }
+  }
+
+  const replaceable = [...samples]
+    .filter((sample) => sample.sample_index > 3)
+    .sort((left, right) => {
+      const leftTime = left.created_at ?? 0;
+      const rightTime = right.created_at ?? 0;
+      return leftTime - rightTime || left.sample_index - right.sample_index;
+    });
+
+  if (replaceable.length === 0) {
+    return Math.min(maxSamples, 3);
+  }
+
+  return replaceable[0].sample_index;
+}
+
+export async function appendCorrectedMatchSample(params: {
+  uri: string;
+  soundCardId: string;
+  label: string;
+  phraseOutput: string;
+  maxSamples?: number;
+}): Promise<TrainingResponse> {
+  const samples = await fetchTrainingSamples(params.soundCardId);
+  const nextSampleIndex = chooseTrainingSampleIndex(samples, params.maxSamples ?? 20);
+  return uploadTrainingSample(
+    params.uri,
+    params.soundCardId,
+    params.label,
+    params.phraseOutput,
+    nextSampleIndex,
+    'corrected_match',
+  );
+}
+
+export async function fetchCardDebugAnalysis(soundCardId: string): Promise<CardDebugAnalysis | null> {
+  const headers = await getAuthorizedHeaders();
+  const response = await fetchApiWithFallback(`/debug/cards/${encodeURIComponent(soundCardId)}/analysis`, {
+    method: 'GET',
+    headers,
+  });
+
+  if (!response.ok) {
+    await throwApiError(response, 'Could not load debug analysis for this card.');
+  }
+
+  const payload = await parseJson(response);
+  if (!isRecord(payload.card)) {
+    return null;
+  }
+
+  const card = payload.card;
+  return {
+    soundCardId: typeof card.soundCardId === 'string' ? card.soundCardId : soundCardId,
+    label: typeof card.label === 'string' ? card.label : '',
+    phraseOutput: typeof card.phraseOutput === 'string' ? card.phraseOutput : '',
+    sampleCount: Number.isFinite(Number(card.sampleCount)) ? Number(card.sampleCount) : 0,
+    readiness:
+      card.readiness === 'low_data' || card.readiness === 'learning' || card.readiness === 'mature'
+        ? card.readiness
+        : 'low_data',
+    sampleCap: Number.isFinite(Number(card.sampleCap)) ? Number(card.sampleCap) : 20,
+    featureBundleVersion: Number.isFinite(Number(card.featureBundleVersion)) ? Number(card.featureBundleVersion) : 0,
+    similarityThreshold: Number.isFinite(Number(card.similarityThreshold)) ? Number(card.similarityThreshold) : 0,
+    marginThreshold: Number.isFinite(Number(card.marginThreshold)) ? Number(card.marginThreshold) : 0,
+    consistencyScore: Number.isFinite(Number(card.consistencyScore)) ? Number(card.consistencyScore) : 0,
+    recommendedAction: typeof card.recommendedAction === 'string' ? card.recommendedAction : null,
+    confusableCards: Array.isArray(card.confusableCards)
+      ? card.confusableCards.filter(isRecord).map((item) => ({
+          sound_card_id: typeof item.sound_card_id === 'string' ? item.sound_card_id : undefined,
+          label: typeof item.label === 'string' ? item.label : '',
+          score: Number.isFinite(Number(item.score)) ? Number(item.score) : 0,
+        }))
+      : [],
+    samples: Array.isArray(card.samples)
+      ? card.samples.filter(isRecord).map((sample) => ({
+          sampleIndex: Number.isFinite(Number(sample.sampleIndex)) ? Number(sample.sampleIndex) : 0,
+          source: typeof sample.source === 'string' ? sample.source : undefined,
+          createdAt: Number.isFinite(Number(sample.createdAt)) ? Number(sample.createdAt) : undefined,
+          duration: Number.isFinite(Number(sample.duration)) ? Number(sample.duration) : undefined,
+          qualitySummary: isRecord(sample.qualitySummary)
+            ? Object.fromEntries(
+                Object.entries(sample.qualitySummary).filter(([, value]) => Number.isFinite(Number(value))),
+              ) as Record<string, number>
+            : undefined,
+          featureQualityFlags: Array.isArray(sample.featureQualityFlags)
+            ? sample.featureQualityFlags.filter((item): item is string => typeof item === 'string')
+            : undefined,
+        }))
+      : [],
+  };
+}
+
+export async function fetchRecognitionEvaluation(): Promise<RecognitionEvaluation> {
+  const headers = await getAuthorizedHeaders();
+  const response = await fetchApiWithFallback('/debug/evaluation', {
+    method: 'GET',
+    headers,
+  });
+
+  if (!response.ok) {
+    await throwApiError(response, 'Could not load recognition evaluation.');
+  }
+
+  const payload = await parseJson(response);
+  return {
+    sampleCount: Number.isFinite(Number(payload.sampleCount)) ? Number(payload.sampleCount) : 0,
+    acceptedAccuracy: Number.isFinite(Number(payload.acceptedAccuracy)) ? Number(payload.acceptedAccuracy) : 0,
+    rejectionRate: Number.isFinite(Number(payload.rejectionRate)) ? Number(payload.rejectionRate) : 0,
+    mostConfusableCards: Array.isArray(payload.mostConfusableCards)
+      ? payload.mostConfusableCards.filter(isRecord).map((item) => ({
+          cards: Array.isArray(item.cards) ? item.cards.filter((entry): entry is string => typeof entry === 'string') : [],
+          count: Number.isFinite(Number(item.count)) ? Number(item.count) : 0,
+        }))
+      : [],
+    evaluations: Array.isArray(payload.evaluations)
+      ? payload.evaluations.filter(isRecord).map((item) => ({
+          expected: typeof item.expected === 'string' ? item.expected : '',
+          predicted: typeof item.predicted === 'string' ? item.predicted : 'unknown',
+          accepted: item.accepted === true,
+          reason: typeof item.reason === 'string' ? item.reason : null,
+          confidence: Number.isFinite(Number(item.confidence)) ? Number(item.confidence) : undefined,
+        }))
+      : [],
+  };
 }
 
 export async function resetTrainingCard(soundCardId: string): Promise<void> {

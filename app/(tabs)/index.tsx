@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -24,7 +26,15 @@ import { QuickActionPill } from '@/components/ui/QuickActionPill';
 import { VocalTrainer } from '@/components/VocalTrainer';
 import { QUICK_ACTION_ICON_BY_LABEL, QUICK_ACTION_LABELS, getCategoryMeta } from '@/constants/categories';
 import { Colors, Layout, Radius, Shadow, Spacing, Typography } from '@/constants/theme';
-import { appendConfirmedMatchSample, checkBackendHealth, predictVocalSound } from '@/lib/recognition';
+import {
+  appendConfirmedMatchSample,
+  appendCorrectedMatchSample,
+  checkBackendHealth,
+  fetchRecognitionEvaluation,
+  predictVocalSound,
+  type RecognitionEvaluation,
+  type RecognitionResult,
+} from '@/lib/recognition';
 
 type RecognitionState =
   | { type: 'idle' }
@@ -78,6 +88,13 @@ export default function HomeScreen() {
   const [lastSpoken, setLastSpoken] = useState<string | null>(null);
   const [isTrainerVisible, setIsTrainerVisible] = useState(false);
   const [selectedCardForTraining, setSelectedCardForTraining] = useState<SoundCard | null>(null);
+  const [lastRecognitionUri, setLastRecognitionUri] = useState<string | null>(null);
+  const [lastRecognitionResult, setLastRecognitionResult] = useState<RecognitionResult | null>(null);
+  const [isCorrectionModalVisible, setIsCorrectionModalVisible] = useState(false);
+  const [isSavingCorrection, setIsSavingCorrection] = useState(false);
+  const [isDebugModalVisible, setIsDebugModalVisible] = useState(false);
+  const [debugEvaluation, setDebugEvaluation] = useState<RecognitionEvaluation | null>(null);
+  const [isLoadingDebugEvaluation, setIsLoadingDebugEvaluation] = useState(false);
 
   const isCompactHeight = height < 820;
   const isVeryCompactHeight = height < 760;
@@ -128,6 +145,10 @@ export default function HomeScreen() {
   );
   const calibrationCount = useMemo(
     () => soundCards.reduce((sum, card) => sum + card.sample_count, 0),
+    [soundCards],
+  );
+  const correctionCandidates = useMemo(
+    () => soundCards.filter((card) => card.is_active).sort((left, right) => left.label.localeCompare(right.label)),
     [soundCards],
   );
 
@@ -189,6 +210,20 @@ export default function HomeScreen() {
     }
   }
 
+  function updateCardFromTraining(card: SoundCard, trainingResponse: Awaited<ReturnType<typeof appendCorrectedMatchSample>>) {
+    return updateCardTrainingStatus(
+      card.id,
+      trainingResponse.sample_count >= 3 ? 'ready' : 'needs_more_samples',
+      trainingResponse.sample_count,
+      {
+        enrollment_quality: trainingResponse.enrollment_quality,
+        distinctiveness_status: trainingResponse.distinctiveness_status,
+        consistency_score: trainingResponse.consistency_score,
+        recommended_action: trainingResponse.recommended_action ?? null,
+      },
+    );
+  }
+
   function promptToSaveConfirmedMatch(uri: string, card: SoundCard) {
     Alert.alert(
       'Add this match to training?',
@@ -206,24 +241,10 @@ export default function HomeScreen() {
             })
               .then(async (trainingResponse) => {
                 if (!trainingResponse) {
-                  Alert.alert(
-                    'Training library full',
-                    'This card already has enough extra samples saved for now.',
-                  );
                   return;
                 }
 
-                await updateCardTrainingStatus(
-                  card.id,
-                  trainingResponse.sample_count >= 3 ? 'ready' : 'needs_more_samples',
-                  trainingResponse.sample_count,
-                  {
-                    enrollment_quality: trainingResponse.enrollment_quality,
-                    distinctiveness_status: trainingResponse.distinctiveness_status,
-                    consistency_score: trainingResponse.consistency_score,
-                    recommended_action: trainingResponse.recommended_action ?? null,
-                  },
-                );
+                await updateCardFromTraining(card, trainingResponse);
 
                 Alert.alert(
                   'Sample added',
@@ -240,6 +261,50 @@ export default function HomeScreen() {
         },
       ],
     );
+  }
+
+  async function handleCorrectPrediction(card: SoundCard) {
+    if (!lastRecognitionUri || isSavingCorrection) {
+      return;
+    }
+
+    try {
+      setIsSavingCorrection(true);
+      const trainingResponse = await appendCorrectedMatchSample({
+        uri: lastRecognitionUri,
+        soundCardId: card.id,
+        label: card.label,
+        phraseOutput: card.phrase_output,
+      });
+      await updateCardFromTraining(card, trainingResponse);
+      setIsCorrectionModalVisible(false);
+      Alert.alert('Correction saved', `Saved this recording under "${card.label}" for future matching.`);
+    } catch (error) {
+      Alert.alert(
+        'Could not save correction',
+        error instanceof Error ? error.message : 'Please try again.',
+      );
+    } finally {
+      setIsSavingCorrection(false);
+    }
+  }
+
+  async function openDebugModal() {
+    if (!__DEV__) return;
+    setIsDebugModalVisible(true);
+    if (debugEvaluation || isLoadingDebugEvaluation) {
+      return;
+    }
+
+    try {
+      setIsLoadingDebugEvaluation(true);
+      const evaluation = await fetchRecognitionEvaluation();
+      setDebugEvaluation(evaluation);
+    } catch (error) {
+      console.warn('[Recognition] debug evaluation failed', error);
+    } finally {
+      setIsLoadingDebugEvaluation(false);
+    }
   }
 
   async function triggerQuickAction(card: SoundCard) {
@@ -308,6 +373,8 @@ export default function HomeScreen() {
       }
 
       const result = await predictVocalSound(uri);
+      setLastRecognitionUri(uri);
+      setLastRecognitionResult(result);
 
       if (result?.sound_card_id && result.phrase_output) {
         const matchedCard = soundCards.find((card) => card.id === result.sound_card_id);
@@ -341,10 +408,14 @@ export default function HomeScreen() {
           type: 'no-match',
           message: result.message ?? 'No trained card matched that sound yet.',
           modelStatus:
-            result.rejection_reason === 'low_margin'
+            result.reason === 'needs_confirmation_low_data'
+              ? 'TalkBridge heard something close, but this card still needs confirmation while it learns.'
+              : result.rejection_reason === 'low_margin'
               ? 'Two phrases sounded too similar to separate safely.'
               : result.rejection_reason === 'below_threshold'
-                ? 'The recording was heard, but it was not strong enough to match.'
+                ? result.reason === 'low_signal'
+                  ? 'The recording quality was too weak or noisy to trust.'
+                  : 'The recording was heard, but it was not strong enough to match.'
                 : 'No trained card matched this sound yet.',
         });
         if (hapticFeedbackEnabled) {
@@ -352,6 +423,8 @@ export default function HomeScreen() {
         }
       }
     } catch (error: unknown) {
+        setLastRecognitionUri(null);
+        setLastRecognitionResult(null);
         setRecognitionState({
           type: 'no-match',
           message:
@@ -370,6 +443,26 @@ export default function HomeScreen() {
     }
   }
 
+  const recognitionActions =
+    lastRecognitionUri && backendOk !== false ? (
+      <View style={styles.recognitionActionRow}>
+        <Pressable style={styles.secondaryActionButton} onPress={() => setIsCorrectionModalVisible(true)}>
+          <Text style={styles.secondaryActionButtonText}>Wrong card?</Text>
+        </Pressable>
+        {__DEV__ && lastRecognitionResult ? (
+          <Pressable style={styles.secondaryActionButton} onPress={() => void openDebugModal()}>
+            <Text style={styles.secondaryActionButtonText}>Inspect</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    ) : __DEV__ && lastRecognitionResult ? (
+      <View style={styles.recognitionActionRow}>
+        <Pressable style={styles.secondaryActionButton} onPress={() => void openDebugModal()}>
+          <Text style={styles.secondaryActionButtonText}>Inspect</Text>
+        </Pressable>
+      </View>
+    ) : null;
+
   const statusCard = (() => {
     if (recognitionState.type === 'success') {
       return (
@@ -381,6 +474,7 @@ export default function HomeScreen() {
           <Text style={styles.infoMeta}>
             {recognitionState.label ?? 'Matched phrase'} • {Math.round(recognitionState.confidence * 100)}%
           </Text>
+          {recognitionActions}
         </View>
       );
     }
@@ -400,6 +494,7 @@ export default function HomeScreen() {
             </Text>
             <ChevronRight size={14} color={Colors.warning} />
           </Pressable>
+          {recognitionActions}
         </View>
       );
     }
@@ -556,6 +651,94 @@ export default function HomeScreen() {
           backendAvailable={backendOk}
         />
       ) : null}
+
+      <Modal visible={isCorrectionModalVisible} transparent animationType="fade" onRequestClose={() => setIsCorrectionModalVisible(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Save this recording to the correct card</Text>
+            <Text style={styles.modalBody}>
+              Choose the card that should learn from the most recent recording.
+            </Text>
+            <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
+              {correctionCandidates.map((card) => (
+                <Pressable
+                  key={card.id}
+                  style={styles.modalListItem}
+                  onPress={() => void handleCorrectPrediction(card)}
+                  disabled={isSavingCorrection}
+                >
+                  <View>
+                    <Text style={styles.modalListTitle}>{card.label}</Text>
+                    <Text style={styles.modalListSubtitle}>{card.phrase_output}</Text>
+                  </View>
+                  <Text style={styles.modalListMeta}>{card.sample_count} saved</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <View style={styles.modalFooter}>
+              {isSavingCorrection ? <ActivityIndicator color={Colors.primary} /> : null}
+              <Pressable style={styles.secondaryActionButton} onPress={() => setIsCorrectionModalVisible(false)} disabled={isSavingCorrection}>
+                <Text style={styles.secondaryActionButtonText}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={isDebugModalVisible} transparent animationType="fade" onRequestClose={() => setIsDebugModalVisible(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, styles.debugModalCard]}>
+            <Text style={styles.modalTitle}>Recognition debug</Text>
+            <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
+              <Text style={styles.debugLabel}>Accepted: {lastRecognitionResult?.accepted ? 'yes' : 'no'}</Text>
+              <Text style={styles.debugLabel}>Reason: {lastRecognitionResult?.reason ?? 'accepted'}</Text>
+              <Text style={styles.debugLabel}>Top matches</Text>
+              {(lastRecognitionResult?.topMatches ?? []).map((match) => (
+                <Text key={`${match.soundCardId}-${match.label}`} style={styles.debugValue}>
+                  {match.label}: {(match.score * 100).toFixed(1)}% · {match.readiness}
+                </Text>
+              ))}
+              <Text style={styles.debugLabel}>Feature summary</Text>
+              <Text style={styles.debugValue}>
+                Duration {lastRecognitionResult?.debug?.featureSummary?.duration?.toFixed?.(2) ?? '0.00'}s ·
+                RMS {lastRecognitionResult?.debug?.featureSummary?.mean_rms?.toFixed?.(4) ?? '0.0000'} ·
+                Voiced {lastRecognitionResult?.debug?.featureSummary?.voiced_ratio?.toFixed?.(2) ?? '0.00'}
+              </Text>
+              <Text style={styles.debugLabel}>Waveform preview</Text>
+              <View style={styles.waveformRow}>
+                {(lastRecognitionResult?.debug?.waveformPreview ?? []).slice(0, 48).map((value, index) => (
+                  <View
+                    key={`wave-${index}`}
+                    style={[
+                      styles.waveformBar,
+                      { height: Math.max(6, Math.min(42, value * 54)) },
+                    ]}
+                  />
+                ))}
+              </View>
+              <Text style={styles.debugLabel}>Library evaluation</Text>
+              {isLoadingDebugEvaluation ? <ActivityIndicator color={Colors.primary} /> : null}
+              {debugEvaluation ? (
+                <>
+                  <Text style={styles.debugValue}>
+                    Accepted accuracy {(debugEvaluation.acceptedAccuracy * 100).toFixed(1)}% · Rejection {(debugEvaluation.rejectionRate * 100).toFixed(1)}%
+                  </Text>
+                  {debugEvaluation.mostConfusableCards.slice(0, 3).map((item, index) => (
+                    <Text key={`confusable-${index}`} style={styles.debugValue}>
+                      {item.cards.join(' vs ')}: {item.count}
+                    </Text>
+                  ))}
+                </>
+              ) : null}
+            </ScrollView>
+            <View style={styles.modalFooter}>
+              <Pressable style={styles.secondaryActionButton} onPress={() => setIsDebugModalVisible(false)}>
+                <Text style={styles.secondaryActionButtonText}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -752,5 +935,114 @@ const styles = StyleSheet.create({
   },
   quickGridItem: {
     width: '31.6%',
+  },
+  recognitionActionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: Spacing.sm,
+    flexWrap: 'wrap',
+  },
+  secondaryActionButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+    borderColor: Colors.strokeMuted,
+    backgroundColor: Colors.background,
+  },
+  secondaryActionButtonText: {
+    color: Colors.textPrimary,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+    justifyContent: 'center',
+    padding: Layout.screenPadding,
+  },
+  modalCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.card,
+    padding: Spacing.lg,
+    borderWidth: 1,
+    borderColor: Colors.strokeMuted,
+    maxHeight: '78%',
+    ...Shadow.soft,
+  },
+  debugModalCard: {
+    maxHeight: '84%',
+  },
+  modalTitle: {
+    ...Typography.sectionTitle,
+    fontSize: 20,
+    lineHeight: 24,
+    marginBottom: 8,
+  },
+  modalBody: {
+    color: Colors.textSecondary,
+    marginBottom: Spacing.md,
+    lineHeight: 20,
+  },
+  modalList: {
+    maxHeight: 340,
+  },
+  modalListContent: {
+    gap: 10,
+    paddingBottom: 4,
+  },
+  modalListItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+    padding: Spacing.md,
+    borderRadius: Radius.lg,
+    backgroundColor: Colors.background,
+    borderWidth: 1,
+    borderColor: Colors.strokeMuted,
+  },
+  modalListTitle: {
+    color: Colors.textPrimary,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  modalListSubtitle: {
+    color: Colors.textSecondary,
+    fontSize: 12,
+  },
+  modalListMeta: {
+    color: Colors.textTertiary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  modalFooter: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: Spacing.md,
+  },
+  debugLabel: {
+    color: Colors.textPrimary,
+    fontWeight: '700',
+    marginTop: 4,
+  },
+  debugValue: {
+    color: Colors.textSecondary,
+    lineHeight: 19,
+  },
+  waveformRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 3,
+    minHeight: 46,
+    marginBottom: 4,
+  },
+  waveformBar: {
+    width: 4,
+    borderRadius: 999,
+    backgroundColor: Colors.primary,
+    opacity: 0.75,
   },
 });

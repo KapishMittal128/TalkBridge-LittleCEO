@@ -36,6 +36,14 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
+# Python/backend runtime files
+__pycache__/
+*.py[cod]
+*.log
+recognition-service/venv/
+recognition-service/temp_*.wav
+recognition-service/temp_*.norm.wav
+
 app-example
 
 # generated native folders
